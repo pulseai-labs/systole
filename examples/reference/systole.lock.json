@@ -1,0 +1,9 @@
+{
+  "engine": {
+    "name": "systole",
+    "version": "0.1.0"
+  },
+  "modules": {
+    "systole.rpg": "0.1.0"
+  }
+}
