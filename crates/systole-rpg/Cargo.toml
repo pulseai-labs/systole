@@ -1,0 +1,7 @@
+[package]
+name = "systole-rpg"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+systole-core = { path = "../systole-core" }

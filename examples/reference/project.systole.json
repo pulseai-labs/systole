@@ -1,0 +1,20 @@
+{
+  "audit_head": null,
+  "engine": {
+    "name": "systole",
+    "version": "0.1.0"
+  },
+  "files": {
+    "systole.lock.json": "sha256:5a6f3ddd23827ae5029578141af10ca842a07ba126e65f780024dbc817ca27af"
+  },
+  "modules": {
+    "systole.rpg": {
+      "schema": 1,
+      "version": "0.1.0"
+    }
+  },
+  "project_hash": "sha256:1896c3fdfbf8debe412b94887f3b800d473bb14b0a52cd1b892bb85a9dad08c0",
+  "project_revision": "rev_00000",
+  "project_schema": 1,
+  "stable_id_counter": 0
+}
