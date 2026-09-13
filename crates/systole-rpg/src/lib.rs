@@ -14,6 +14,7 @@
 
 pub mod ops;
 pub mod schema;
+pub mod validators;
 
 use systole_core::module::{Module, ModuleManifest, Validator};
 use systole_core::registry::Registry;
@@ -41,6 +42,10 @@ impl Module for RpgModule {
     }
 
     fn validators(&self) -> Vec<Box<dyn Validator>> {
-        Vec::new()
+        // The validator's fix contract needs the real dispatch path: a
+        // registry carrying this module's ops, held by the validator.
+        let mut registry = Registry::new();
+        self.register(&mut registry);
+        vec![Box::new(validators::reachability::Reachability::new(registry))]
     }
 }

@@ -21,3 +21,4 @@ pub mod op;
 pub mod registry;
 pub mod revision;
 pub mod tx;
+pub mod validators;

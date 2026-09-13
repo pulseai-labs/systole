@@ -42,6 +42,6 @@ impl Module for CoreModule {
     fn register(&self, _registry: &mut Registry) {}
 
     fn validators(&self) -> Vec<Box<dyn Validator>> {
-        Vec::new()
+        vec![Box::new(crate::validators::reference_integrity::ReferenceIntegrity)]
     }
 }
