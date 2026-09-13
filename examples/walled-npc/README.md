@@ -22,3 +22,7 @@ This fixture is the release's exit-criterion-2 project and the starting
 point for `examples/` work in later items. Nothing writes into it after
 commit; copy it first (`cp -R examples/walled-npc <dest>`) before applying
 fixes.
+
+The golden journey (`cargo test -p systole --test golden_journey`) does not
+touch this fixture — it initialises its own project under the cargo target
+dir and copies nothing from here.
