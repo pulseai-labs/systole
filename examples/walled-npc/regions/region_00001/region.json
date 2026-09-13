@@ -1,0 +1,39 @@
+{
+  "constraints": [],
+  "height": 16,
+  "id": "town",
+  "intent": "",
+  "kind": "region",
+  "owner_module": "systole.rpg",
+  "placements": [
+    {
+      "at": [
+        5,
+        5
+      ],
+      "facing": "down",
+      "stable_id": "ent_00002"
+    }
+  ],
+  "spawn": [
+    1,
+    1
+  ],
+  "stable_id": "region_00001",
+  "tags": [],
+  "warps": [
+    {
+      "at": [
+        15,
+        8
+      ],
+      "stable_id": "warp_00003",
+      "to": {
+        "at": null,
+        "region_id": "route_1",
+        "region_stable_id": null
+      }
+    }
+  ],
+  "width": 16
+}

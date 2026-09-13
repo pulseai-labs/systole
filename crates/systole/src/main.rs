@@ -39,18 +39,39 @@ enum Command {
         #[command(subcommand)]
         command: OpCommand,
     },
-    /// Materialize an op request into a plan file
+    /// Materialize an op request into a plan file — or plan a finding's
+    /// suggested fix with --from-finding (findings come from `validate`;
+    /// their suggested fixes are ordinary PlanRequests applied through apply)
     Plan {
-        /// The operation id
-        op_id: String,
+        /// The operation id (omit when --from-finding is given)
+        op_id: Option<String>,
 
-        /// JSON literal, @file, or - for stdin
+        /// JSON literal, @file, or - for stdin (required with an op id)
         #[arg(long, value_name = "JSON")]
-        input: String,
+        input: Option<String>,
 
         /// Write the plan here instead of plans/<plan_id>.json
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+
+        /// Plan the suggested fix of a `validate` finding — a finding_id, or
+        /// a code when exactly one finding carries it
+        #[arg(long, value_name = "FINDING")]
+        from_finding: Option<String>,
+
+        /// Which suggested fix to plan (default: 0)
+        #[arg(long, value_name = "N")]
+        fix: Option<usize>,
+    },
+    /// Run every registered module validator over the project:
+    /// core.reference_integrity checks that stable-id references resolve to
+    /// objects of the right kind; rpg.reachability checks that placements and
+    /// warp tiles are reachable from each region's spawn over walkable tiles.
+    /// Findings carry suggested fixes applied through `plan --from-finding`.
+    Validate {
+        /// Validate the whole project (the only scope in Release 0)
+        #[arg(long)]
+        all: bool,
     },
     /// Show a plan's diff and findings without writing anything
     Preview {
@@ -157,9 +178,27 @@ fn main() {
                 cmd::op::describe(&root, id, cli.json)
             }
         },
-        Command::Plan { op_id, input, out } => {
+        Command::Plan {
+            op_id,
+            input,
+            out,
+            from_finding,
+            fix,
+        } => {
             let root = cmd::project_root(cli.project.as_deref());
-            cmd::plan::run(&root, op_id, input, out.as_deref(), cli.json)
+            cmd::plan::run(
+                &root,
+                op_id.as_deref(),
+                input.as_deref(),
+                out.as_deref(),
+                from_finding.as_deref(),
+                *fix,
+                cli.json,
+            )
+        }
+        Command::Validate { all: _ } => {
+            let root = cmd::project_root(cli.project.as_deref());
+            cmd::validate::run(&root, cli.json)
         }
         Command::Preview {
             target,

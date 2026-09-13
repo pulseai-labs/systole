@@ -11,14 +11,12 @@ pub mod set_collision;
 
 use std::collections::BTreeSet;
 
-use serde_json::{json, Value};
-use systole_core::finding::{Finding, Location, Severity};
+use serde_json::Value;
+use systole_core::finding::{finding_id, Finding, Location, Severity};
 use systole_core::ids::{IdKind, StableId};
-use systole_core::ir::format::format_value;
 use systole_core::ir::project::Project;
 use systole_core::ir::RelPath;
 use systole_core::op::{Diff, FileChange, OpError, PlanRequest};
-use systole_core::revision::sha256_hex;
 use systole_core::tx::Transaction;
 
 use crate::schema;
@@ -58,7 +56,8 @@ pub(crate) fn fix_request(op_id: &str, input: Value) -> PlanRequest {
 }
 
 /// Build a finding whose `finding_id` is deterministic (ADR-0010): the first
-/// 16 hex of sha256 over the canonical bytes of `{code, location, evidence}`.
+/// 16 hex of sha256 over the canonical bytes of `{code, location, evidence}` —
+/// the shared `systole_core::finding::finding_id` formula.
 pub(crate) fn make_finding(
     code: &str,
     severity: Severity,
@@ -68,22 +67,17 @@ pub(crate) fn make_finding(
     evidence: Value,
     suggested_fixes: Vec<PlanRequest>,
 ) -> Finding {
-    let mut finding = Finding {
-        finding_id: String::new(),
+    let location = Location { stable_id, path };
+    let id = finding_id(code, &location, &evidence);
+    Finding {
+        finding_id: id,
         code: code.to_string(),
         severity,
-        location: Location { stable_id, path },
+        location,
         evidence,
         suggested_fixes,
         blocking,
-    };
-    let basis = json!({
-        "code": finding.code,
-        "location": serde_json::to_value(&finding.location).unwrap_or(Value::Null),
-        "evidence": finding.evidence,
-    });
-    finding.finding_id = format!("finding_{}", &sha256_hex(&format_value(&basis))[..16]);
-    finding
+    }
 }
 
 /// Findings ordered by `finding_id` so output diffs cleanly (ADR-0010).

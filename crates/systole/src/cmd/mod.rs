@@ -11,6 +11,7 @@ pub mod plan;
 pub mod preview;
 pub mod query;
 pub mod rollback;
+pub mod validate;
 
 use std::path::Path;
 
@@ -40,8 +41,8 @@ pub fn compose() -> (Registry, Vec<ModuleManifest>) {
     (registry, vec![rpg.manifest()])
 }
 
-/// Every registered module validator — doctor runs them after an absorb.
-/// None are registered until a later work item; the seam is wired now.
+/// Every registered module validator, in registration order — `validate`
+/// and `plan --from-finding` run them, and doctor runs them after an absorb.
 pub fn module_validators() -> Vec<Box<dyn systole_core::module::Validator>> {
     let mut out = CoreModule.validators();
     out.extend(systole_rpg::RpgModule.validators());
@@ -274,6 +275,19 @@ fn error_code(err: &EngineError) -> (&'static str, i32) {
         EngineError::Commit(_) | EngineError::Io(_) => ("engine.io", 2),
         EngineError::Project(_) => ("project.integrity", 2),
     }
+}
+
+/// A structured refusal outside the engine-error ladder (finding selection,
+/// CLI usage): `{"error": {code, message}, "project_root"}` on stdout under
+/// `--json`, the message on stderr otherwise.
+pub fn structured_refusal(
+    root: &Path,
+    code: &str,
+    message: &str,
+    exit: i32,
+    json: bool,
+) -> i32 {
+    report_structured(root, code, message, exit, json)
 }
 
 fn report_structured(
