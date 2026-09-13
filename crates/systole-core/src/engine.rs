@@ -65,6 +65,8 @@ pub enum EngineError {
     InvalidRequest(String),
     #[error("plan blocked by findings")]
     Blocked(Vec<Finding>),
+    #[error("refused: staged writes differ from the previewed diff ({0})")]
+    StagedDiffMismatch(String),
     #[error("project is locked by pid {pid}")]
     Locked { pid: u32 },
     #[error("not head: requested {requested}, head is {}", head.as_deref().unwrap_or("<none>"))]
@@ -325,6 +327,33 @@ impl Engine {
 
         let mut tx = Transaction::new(&self.project);
         let output = self.registry.apply(&mut tx, plan.clone())?;
+
+        // The diff the validators ran against is the preview's; the writes
+        // this commit actually applies are tx.staged(). They must be the
+        // same set — a module whose apply() stages anything its diff() did
+        // not declare would bypass the validation gate entirely.
+        let mut declared = preview.diff.changes.clone();
+        let mut staged = tx.staged().to_vec();
+        declared.sort_by(|a, b| a.path.cmp(&b.path));
+        staged.sort_by(|a, b| a.path.cmp(&b.path));
+        if declared != staged {
+            let staged_only = staged
+                .iter()
+                .filter(|c| !declared.contains(c))
+                .map(|c| c.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let declared_only = declared
+                .iter()
+                .filter(|c| !staged.contains(c))
+                .map(|c| c.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(EngineError::StagedDiffMismatch(format!(
+                "staged-not-declared: [{staged_only}]; declared-not-staged: [{declared_only}]"
+            )));
+        }
+
         let entry = commit::run(
             &self.root,
             &self.project,

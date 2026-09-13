@@ -273,6 +273,7 @@ fn error_code(err: &EngineError) -> (&'static str, i32) {
         EngineError::ApprovalRequired { .. } => ("capability.approval_required", 2),
         EngineError::StalePlan { .. } => ("plan.stale", 1),
         EngineError::Blocked(_) => ("plan.blocked", 1),
+        EngineError::StagedDiffMismatch(_) => ("plan.staged_diff_mismatch", 1),
         EngineError::InvalidRequest(_) => ("op.invalid_request", 2),
         EngineError::Locked { .. } => ("project.locked", 2),
         EngineError::NotHead { .. } => ("audit.not_head", 1),
@@ -364,7 +365,7 @@ mod tests {
 
     #[test]
     fn engine_errors_map_to_their_structured_codes_and_exits() {
-        let cases: [(EngineError, &str, i32); 12] = [
+        let cases: [(EngineError, &str, i32); 13] = [
             (EngineError::ReadOnly, "project.read_only", 2),
             (
                 EngineError::CapabilityDenied {
@@ -394,6 +395,11 @@ mod tests {
                 1,
             ),
             (EngineError::Blocked(vec![]), "plan.blocked", 1),
+            (
+                EngineError::StagedDiffMismatch("x".into()),
+                "plan.staged_diff_mismatch",
+                1,
+            ),
             (
                 EngineError::InvalidRequest("x".into()),
                 "op.invalid_request",

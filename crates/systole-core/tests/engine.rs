@@ -488,12 +488,66 @@ impl Operation for EscapeOp {
     }
 }
 
+/// A module whose apply() stages a write its diff() never declared — the
+/// commit gate must refuse before the transaction touches disk.
+#[derive(Default)]
+struct DisagreeOp;
+
+impl Operation for DisagreeOp {
+    type Request = EmptyReq;
+    type Plan = EmptyPlan;
+    type Output = EmptyOut;
+
+    const ID: &'static str = "test.disagree";
+    const VERSION: u32 = 1;
+    const CAPABILITY: Capability = Capability::ProjectWrite;
+    const STABILITY: Stability = Stability::Internal;
+    const MUTABILITY: Mutability = Mutability::Write;
+
+    fn describe() -> OperationDescription {
+        OperationDescription {
+            id: Self::ID.into(),
+            version: Self::VERSION,
+            summary: "diff/apply disagreement probe".into(),
+            input_schema: schemars::schema_for!(EmptyReq),
+            example: json!({}),
+            avoid_when: vec!["always".into()],
+        }
+    }
+    fn validate_request(&self, _req: &Self::Request) -> Result<(), OpError> {
+        Ok(())
+    }
+    fn materialize(&self, _p: &Project, _r: Self::Request) -> Result<Self::Plan, OpError> {
+        Ok(EmptyPlan {})
+    }
+    fn diff(&self, _p: &Project, _pl: &Self::Plan) -> Result<Diff, OpError> {
+        Ok(Diff {
+            changes: vec![FileChange {
+                path: RelPath::new("entities/note/ent_00009.json"),
+                before: None,
+                after: Some(json!({ "declared": true })),
+            }],
+        })
+    }
+    fn validate(&self, _p: &Project, _pl: &Self::Plan) -> Vec<Finding> {
+        Vec::new()
+    }
+    fn apply(&self, tx: &mut Transaction, _pl: Self::Plan) -> Result<Self::Output, OpError> {
+        tx.write(
+            RelPath::new("entities/note/ent_00077.json"),
+            json!({ "undeclared": true }),
+        );
+        Ok(EmptyOut {})
+    }
+}
+
 fn test_registry() -> Registry {
     let mut r = Registry::new();
     r.register::<NoteOp>();
     r.register::<NetOp>();
     r.register::<DelOp>();
     r.register::<EscapeOp>();
+    r.register::<DisagreeOp>();
     r
 }
 
@@ -1411,6 +1465,42 @@ fn an_op_staging_an_escaping_path_is_refused_before_anything_writes() {
             .unwrap()
             .is_empty()
     );
+    assert_eq!(
+        engine.project().manifest.project_revision,
+        "rev_00000"
+    );
+    Project::load(&root).expect("project untouched by the refused commit");
+}
+
+#[test]
+fn a_module_whose_apply_disagrees_with_its_diff_is_refused_at_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("proj");
+    Project::init(&root, false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(&root);
+
+    let req = PlanRequest {
+        op_id: "test.disagree".into(),
+        op_version: 1,
+        input: json!({}),
+        actor: "cli_local".into(),
+    };
+    let plan = engine.materialize(&req).expect("materialize");
+    let result = engine.commit(&req, plan);
+    assert!(matches!(
+        result,
+        Err(EngineError::StagedDiffMismatch(_))
+    ));
+
+    // Nothing was written or staged on disk — no marker, no file, and the
+    // project still verifies at its old revision.
+    assert!(
+        two_phase::pending_marker_files(&root)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!root.join("entities/note/ent_00077.json").exists());
+    assert!(!root.join("entities/note/ent_00009.json").exists());
     assert_eq!(
         engine.project().manifest.project_revision,
         "rev_00000"

@@ -94,15 +94,21 @@ pub(crate) fn predicted_id(project: &Project, kind: IdKind) -> String {
 }
 
 /// Assemble a `Diff` from the `(path, after)` writes an apply will stage;
-/// `before` is the project's current value at each path.
+/// `before` is the project's current value at each path. No-op writes —
+/// where the after-image equals the value already on disk — are filtered
+/// out: `stage_if_changed` stages nothing for them, so emitting them here
+/// would make the preview claim changes the commit never makes.
 pub(crate) fn diff_of(project: &Project, writes: Vec<(RelPath, Value)>) -> Diff {
     Diff {
         changes: writes
             .into_iter()
-            .map(|(path, after)| FileChange {
-                before: project.files.get(&path).cloned(),
-                path,
-                after: Some(after),
+            .filter_map(|(path, after)| {
+                let before = project.files.get(&path).cloned();
+                (before.as_ref() != Some(&after)).then_some(FileChange {
+                    before,
+                    path,
+                    after: Some(after),
+                })
             })
             .collect(),
     }
