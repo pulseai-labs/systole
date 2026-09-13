@@ -1142,3 +1142,103 @@ fn doctor_refuses_a_torn_line_that_is_not_the_markers_entry() {
     );
 }
 
+struct BlockingValidator;
+
+impl systole_core::module::Validator for BlockingValidator {
+    fn id(&self) -> &'static str {
+        "test.always_blocking"
+    }
+
+    fn run(&self, _project: &Project) -> Vec<Finding> {
+        vec![Finding {
+            finding_id: "finding_blocking".into(),
+            code: "test.always_blocking".into(),
+            severity: Severity::Error,
+            location: Location {
+                stable_id: None,
+                path: None,
+            },
+            evidence: json!({}),
+            suggested_fixes: vec![],
+            blocking: true,
+        }]
+    }
+}
+
+#[test]
+fn absorb_advances_the_stable_id_counter_past_observed_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(tmp.path());
+    apply_note(&mut engine, "a");
+    drop(engine);
+
+    // A hand-added entity whose stable id outruns the recorded counter.
+    let foreign = note_value("ent_00009", "written by hand");
+    std::fs::create_dir_all(tmp.path().join("entities/note")).unwrap();
+    std::fs::write(
+        tmp.path().join("entities/note/ent_00009.json"),
+        systole_core::ir::format::format_value(&foreign),
+    )
+    .unwrap();
+
+    let report = doctor::run(tmp.path(), true, &[]).expect("absorb succeeds");
+    assert!(report.absorbed.is_some());
+
+    let mut engine = open_engine(tmp.path());
+    let entry = apply_note(&mut engine, "b");
+    assert_eq!(
+        engine.project().manifest.stable_id_counter, 10,
+        "the counter moved past the observed ent_00009"
+    );
+    assert!(
+        tmp.path().join("entities/note/ent_00010.json").exists(),
+        "the next allocation is ent_00010, not a reissue of ent_00002"
+    );
+    let _ = entry;
+    Project::load(tmp.path()).expect("post-absorb state verifies");
+}
+
+#[test]
+fn absorb_marks_validator_findings_advisory_and_flags_noncanonical_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(tmp.path());
+    apply_note(&mut engine, "a");
+    drop(engine);
+
+    // A hand edit in non-canonical form: content the loader parses, bytes the
+    // verifier must flag by path.
+    let path = tmp.path().join("entities/note/ent_00001.json");
+    let edited = note_value("ent_00001", "hand edited");
+    std::fs::write(&path, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
+
+    let err = Project::load(tmp.path()).expect_err("noncanonical bytes are refused");
+    match err {
+        ProjectError::Integrity(integrity) => {
+            assert!(
+                integrity
+                    .changed
+                    .iter()
+                    .any(|p| p.as_str() == "entities/note/ent_00001.json"),
+                "the noncanonical file is named: {:?}",
+                integrity.changed
+            );
+        }
+        other => panic!("expected Integrity, got {other:?}"),
+    }
+
+    let report = doctor::run(tmp.path(), true, &[Box::new(BlockingValidator)])
+        .expect("absorb succeeds even with validator findings");
+    assert!(report.absorbed.is_some());
+    assert!(
+        !report.blocking,
+        "absorbed findings are advisory — the run is not blocking"
+    );
+    assert!(
+        report.findings.iter().all(|f| !f.blocking),
+        "every reported finding is advisory"
+    );
+    // Absorb rewrote the file to canonical form: the project verifies.
+    Project::load(tmp.path()).expect("absorbed state verifies canonically");
+}

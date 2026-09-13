@@ -83,7 +83,7 @@ fn walled_project(tag: &str) -> (TempDir, PathBuf) {
     region_file["placements"][0]["at"] = serde_json::json!([5, 5]);
     std::fs::write(&region_path, serde_json::to_string_pretty(&region_file).unwrap()).unwrap();
     let seal = on(&root, &["project", "doctor", "--absorb"]);
-    assert_eq!(seal.status.code(), Some(1), "seal absorb failed: {seal:?}");
+    assert_eq!(seal.status.code(), Some(0), "seal absorb failed: {seal:?}");
     (guard, root)
 }
 

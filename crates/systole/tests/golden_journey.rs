@@ -286,7 +286,7 @@ fn step_build_and_validate(root: &Path) -> String {
     let seal = on(root, &["project", "doctor", "--absorb"]);
     assert_eq!(
         seal.status.code(),
-        Some(1),
+        Some(0),
         "step 6.5: absorb seals the elder"
     );
     assert_eq!(

@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
 
 use sha2::{Digest, Sha256};
 
@@ -100,23 +101,33 @@ pub fn project_hash(entries: &BTreeMap<RelPath, Vec<u8>>) -> String {
 /// manifest's record. On mismatch, name exactly which files changed by hashing
 /// each domain file against the manifest's `files` table.
 pub fn verify(project: &Project) -> Result<(), IntegrityError> {
-    // Canonical bytes of every hash-domain file, keyed by relative path.
+    // Canonical bytes of every hash-domain file, keyed by relative path —
+    // except the lock and the IR files, which enter as the RAW bytes on disk:
+    // a hand edit that only re-formats a tracked file (whitespace, key order)
+    // changes its digest and is reported, not silently recanonicalized.
     let mut domain: BTreeMap<RelPath, Vec<u8>> = BTreeMap::new();
     domain.insert(
         RelPath::new(MANIFEST_FILE),
         format_value(&blanked_manifest_value(&project.manifest)),
     );
-    domain.insert(
-        RelPath::new(LOCK_FILE),
-        format_value(&serde_json::to_value(&project.lock).expect("lock serializes")),
-    );
-    for (path, value) in &project.files {
-        domain.insert(path.clone(), format_value(value));
+    if let Ok(bytes) = fs::read(project.root.join(LOCK_FILE)) {
+        domain.insert(RelPath::new(LOCK_FILE), bytes);
     }
+    for path in project.files.keys() {
+        if let Ok(bytes) = fs::read(project.root.join(path.as_str())) {
+            domain.insert(path.clone(), bytes);
+        }
+    }
+
+    // The manifest's own bytes must be canonical too — content-equal but
+    // re-formatted is still an out-of-band edit.
+    let manifest_canonical = fs::read(project.root.join(MANIFEST_FILE))
+        .map(|bytes| bytes == project.manifest_bytes())
+        .unwrap_or(false);
 
     let actual = project_hash(&domain);
     let expected = project.manifest.project_hash.clone();
-    if actual == expected {
+    if actual == expected && manifest_canonical {
         return Ok(());
     }
 
@@ -135,9 +146,9 @@ pub fn verify(project: &Project) -> Result<(), IntegrityError> {
             changed.push(path.clone());
         }
     }
-    if changed.is_empty() {
-        // No domain file disagrees with the table, so the manifest itself is
-        // what changed (its recorded hash no longer matches its own content).
+    if !manifest_canonical || changed.is_empty() {
+        // The manifest itself changed — noncanonical bytes, or content whose
+        // recorded hash no longer matches.
         changed.push(RelPath::new(MANIFEST_FILE));
     }
 

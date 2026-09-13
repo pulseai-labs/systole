@@ -23,6 +23,7 @@ use crate::ir::format::format_value;
 use crate::ir::manifest::Manifest;
 use crate::ir::project::{Project, ProjectError};
 use crate::ir::writer::{sync_dir, write_atomic};
+use crate::ids::StableId;
 use crate::ir::MANIFEST_FILE;
 use crate::lock::{LockError, WriteLock};
 use crate::module::Validator;
@@ -413,6 +414,37 @@ fn pending_markers(root: &Path) -> Result<Vec<PendingMarker>, DoctorError> {
 /// recorded diff is digests: `before` is the digest the manifest recorded,
 /// `after` the digest of the observed canonical bytes (or null when a file
 /// vanished). Runs through the same two-phase commit as any transaction.
+/// The highest stable-id number observed anywhere in the project — the
+/// post-absorb counter derives from it so a hand-added object can never have
+/// its id reissued by a later op.
+fn observed_stable_id_counter(project: &Project) -> u64 {
+    fn walk(value: &serde_json::Value, max: &mut u64) {
+        match value {
+            serde_json::Value::String(s) => {
+                if let Ok(id) = StableId::try_from(s.clone()) {
+                    *max = (*max).max(id.n);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, max);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for v in map.values() {
+                    walk(v, max);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut max = project.manifest.stable_id_counter;
+    for value in project.files.values() {
+        walk(value, &mut max);
+    }
+    max
+}
+
 fn absorb_external_edit(
     project: &Project,
     integrity: &IntegrityError,
@@ -442,12 +474,25 @@ fn absorb_external_edit(
             after: Some(after),
         });
     }
+    // The staged writes rewrite each changed file to its canonical bytes —
+    // verification digests the raw on-disk form, so absorb must leave the
+    // observed CONTENT in canonical form or the project would verify dirty
+    // forever.
+    let canonicalizing: Vec<crate::op::FileChange> = integrity
+        .changed
+        .iter()
+        .map(|path| crate::op::FileChange {
+            path: path.clone(),
+            before: None,
+            after: project.files.get(path).cloned(),
+        })
+        .collect();
     let entry = commit::run(
         &project.root,
         project,
-        &[],
+        &canonicalizing,
         &digest_rows,
-        project.manifest.stable_id_counter,
+        observed_stable_id_counter(project),
         CommitMeta {
             actor: "cli_local".into(),
             op_id: "core.external_edit".into(),
@@ -519,10 +564,16 @@ pub fn run(
             // reported as warnings and never block.
             let absorbed_project = Project::load_unverified(root)?;
             for v in validators {
-                findings.extend(v.run(&absorbed_project));
+                // Findings over an absorbed state are advisory — absorb
+                // reports what the editor left behind; it does not gate.
+                let mut run_findings = v.run(&absorbed_project);
+                for f in &mut run_findings {
+                    f.blocking = false;
+                }
+                findings.extend(run_findings);
             }
             drop(_lock);
-            let _ = revision::verify(&absorbed_project).map_err(DoctorError::Integrity)?;
+            revision::verify(&absorbed_project).map_err(DoctorError::Integrity)?;
         }
     }
 
