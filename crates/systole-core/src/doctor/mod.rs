@@ -377,6 +377,32 @@ fn pending_markers(root: &Path) -> Result<Vec<PendingMarker>, DoctorError> {
         let bytes = fs::read(entry.path()).map_err(|e| DoctorError::Io(e.to_string()))?;
         let marker: PendingMarker = serde_json::from_slice(&bytes)
             .map_err(|e| DoctorError::Io(format!("unparseable marker {name}: {e}")))?;
+        // Every recorded file target must stay inside the project: only
+        // ordinary components — no absolute prefix, no parent steps.
+        let inside = |t: &str| {
+            !t.is_empty()
+                && std::path::Path::new(t)
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+        };
+        if marker
+            .files
+            .iter()
+            .any(|f| !inside(&f.path) || f.temp_path.as_deref().is_some_and(|t| !inside(t)))
+        {
+            return Err(DoctorError::MarkerRejected(format!(
+                "{name}: records a file target outside the project root"
+            )));
+        }
+        // The claimed id must equal the file it was read from: a forged id
+        // could aim marker_path writes and removals outside audit/pending.
+        let stem = name.strip_suffix(".json").unwrap_or_default();
+        if marker.transaction_id != stem {
+            return Err(DoctorError::MarkerRejected(format!(
+                "{name}: marker claims transaction_id {:?}",
+                marker.transaction_id
+            )));
+        }
         out.push(marker);
     }
     out.sort_by(|a, b| a.transaction_id.cmp(&b.transaction_id));

@@ -170,6 +170,21 @@ pub fn verify_chain(
                 reason: "entry is not in canonical line form".into(),
             });
         }
+        // Every recorded change target must stay inside the project: a forged
+        // or corrupted line must not aim later renames outside the root.
+        for change in &entry.changes {
+            let inside = !change.path.as_str().is_empty()
+                && std::path::Path::new(change.path.as_str())
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)));
+            if !inside {
+                return Err(ChainBreak {
+                    index: i,
+                    audit_id: Some(entry.audit_id.clone()),
+                    reason: "entry records an out-of-project target".to_string(),
+                });
+            }
+        }
         if entry.audit_id != expected_id {
             return Err(ChainBreak {
                 index: i,

@@ -394,6 +394,22 @@ impl Engine {
             });
         }
 
+        // The compensating write set comes from the entry's recorded paths —
+        // refuse any target that would leave the project root.
+        for c in &target.changes {
+            let inside = !c.path.as_str().is_empty()
+                && std::path::Path::new(c.path.as_str())
+                    .components()
+                    .all(|p| matches!(p, std::path::Component::Normal(_)));
+            if !inside {
+                return Err(EngineError::Chain(crate::audit::ChainBreak {
+                    index: lines.len() - 1,
+                    audit_id: Some(target.audit_id.clone()),
+                    reason: "head entry records an out-of-project target".into(),
+                }));
+            }
+        }
+
         // Inverse diff: each change's before becomes its after.
         let inverse: Vec<FileChange> = target
             .changes

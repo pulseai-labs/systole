@@ -880,6 +880,53 @@ fn doctor_rejects_a_marker_that_does_not_authenticate() {
 }
 
 #[test]
+fn doctor_rejects_a_marker_recording_an_out_of_root_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let engine = open_engine(tmp.path());
+    let req = note_req("outside");
+    let plan = engine.materialize(&req).unwrap();
+    let mut tx = Transaction::new(engine.project());
+    let output = engine.registry().apply(&mut tx, plan.clone()).unwrap();
+    drop(engine);
+
+    let prepared = two_phase::plan_commit(
+        tmp.path(),
+        &project,
+        tx.staged(),
+        tx.staged(),
+        tx.stable_id_counter(),
+        two_phase::CommitMeta {
+            actor: "cli_local".into(),
+            op_id: plan.op_id.clone(),
+            op_version: plan.op_version,
+            input: req.input.clone(),
+            plan_id: Some(plan.plan_id.clone()),
+            capability: "project.write".into(),
+            approval: "allow".into(),
+            rollback_of: None,
+            output,
+        },
+    )
+    .unwrap();
+    let mut marker = prepared.marker.clone();
+    // A forged marker whose first target would escape the project root.
+    marker.files[0].path = [".", "."].concat() + "/escape.json";
+    two_phase::write_marker(tmp.path(), &mut marker, "renaming").unwrap();
+
+    let result = doctor::run(tmp.path(), false, &[]);
+    assert!(
+        matches!(result, Err(doctor::DoctorError::MarkerRejected(_))),
+        "an out-of-root target must be rejected, got {}",
+        result.is_ok()
+    );
+    assert!(
+        !tmp.path().parent().unwrap().join("escape.json").exists(),
+        "nothing was written outside the root"
+    );
+}
+
+#[test]
 fn doctor_rollback_restores_the_manifest_when_its_rename_landed() {
     let tmp = tempfile::tempdir().unwrap();
     let project = Project::init(tmp.path(), false, &rpg_modules()).unwrap();
