@@ -1,0 +1,338 @@
+//! `project doctor` (ADR-0006): detect and resolve interrupted commits, then
+//! check health. Order: resolve pending markers (completing or rolling back
+//! each crashed transaction), verify the audit chain and `audit_head`, then
+//! re-verify the load-time hash.
+//!
+//! `--absorb` exists because humans will edit the IR by hand: when the hash
+//! fails, the doctor can commit the observed state as an `external_edit`
+//! entry — the diff recorded is digests, not content (the engine never claims
+//! to know what the editor wrote). Absorb also runs module validators and
+//! reports their findings as warnings. There is no force-accept flag in
+//! Release 0.
+
+use std::fs;
+use std::path::Path;
+
+use serde_json::json;
+
+use crate::audit::{self, AuditEntry, ChainBreak};
+use crate::capability::Capability;
+use crate::engine::is_read_only;
+use crate::finding::Finding;
+use crate::ir::format::format_value;
+use crate::ir::project::{Project, ProjectError};
+use crate::lock::{LockError, WriteLock};
+use crate::module::Validator;
+use crate::revision::{self, digest_of, IntegrityError};
+use crate::tx::commit::{self, CommitError, CommitMeta, PendingMarker};
+
+#[derive(Debug, thiserror::Error)]
+pub enum DoctorError {
+    #[error(transparent)]
+    Project(#[from] ProjectError),
+    #[error(transparent)]
+    Chain(#[from] ChainBreak),
+    #[error("{0}")]
+    Commit(#[from] CommitError),
+    #[error("{0}")]
+    Io(String),
+    #[error("refused: SYSTOLE_READ_ONLY=1")]
+    ReadOnly,
+    #[error("project is locked by pid {pid}")]
+    Locked { pid: u32 },
+    #[error("{0}")]
+    Integrity(#[from] IntegrityError),
+}
+
+/// How a pending transaction was resolved.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Recovery {
+    /// All files were in place or staged; the audit entry was appended (once).
+    Completed { transaction_id: String },
+    /// The transaction was incomplete; temps were removed and renamed files
+    /// restored to their `before` images.
+    RolledBack { transaction_id: String },
+}
+
+pub struct DoctorReport {
+    /// `Some` iff a pending marker was resolved this run.
+    pub recovered: Option<Recovery>,
+    /// Audit entries in the log after recovery.
+    pub entries: usize,
+    /// `Some(audit_id)` iff `--absorb` committed an `external_edit` entry.
+    pub absorbed: Option<String>,
+    /// Findings from module validators (absorb only).
+    pub findings: Vec<Finding>,
+    /// Any blocking findings.
+    pub blocking: bool,
+}
+
+fn lock_for(root: &Path) -> Result<WriteLock, DoctorError> {
+    WriteLock::acquire(root).map_err(|e| match e {
+        LockError::Held { pid } => DoctorError::Locked { pid },
+        LockError::Io(e) => DoctorError::Io(e.to_string()),
+    })
+}
+
+/// Where one marker file stands relative to its post-state.
+enum FileState {
+    /// Target already carries the post-state bytes (a delete: target absent).
+    InPlace,
+    /// Temp exists and carries the post-state bytes.
+    Staged,
+    /// Neither — the transaction is incomplete.
+    Incomplete,
+}
+
+fn file_state(root: &Path, file: &commit::PendingFile) -> FileState {
+    match &file.temp_path {
+        Some(temp) => {
+            let target = root.join(&file.path);
+            let expected = file.expected_post_hash.as_deref().unwrap_or("");
+            if let Ok(bytes) = fs::read(&target) {
+                if digest_of(&bytes) == expected {
+                    return FileState::InPlace;
+                }
+            }
+            if let Ok(bytes) = fs::read(root.join(temp)) {
+                if digest_of(&bytes) == expected {
+                    return FileState::Staged;
+                }
+            }
+            FileState::Incomplete
+        }
+        // A delete: "in place" means the target is already gone.
+        None => {
+            if root.join(&file.path).exists() {
+                FileState::Incomplete
+            } else {
+                FileState::InPlace
+            }
+        }
+    }
+}
+
+/// Resolve one pending marker (ADR-0007's rules):
+/// - every file in place or staged → complete: rename remaining temps, append
+///   the entry unless the log already carries its `audit_id`, remove marker;
+/// - anything else → roll back: remove temps, restore `before` images on files
+///   already renamed, remove marker.
+fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, DoctorError> {
+    let states: Vec<FileState> = marker
+        .files
+        .iter()
+        .map(|f| file_state(root, f))
+        .collect();
+    let completable = states
+        .iter()
+        .all(|s| matches!(s, FileState::InPlace | FileState::Staged));
+
+    if completable {
+        for (file, state) in marker.files.iter().zip(&states) {
+            if let (Some(temp), FileState::Staged) = (&file.temp_path, state) {
+                let target = root.join(&file.path);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(|e| DoctorError::Io(e.to_string()))?;
+                }
+                fs::rename(root.join(temp), &target)
+                    .map_err(|e| DoctorError::Io(e.to_string()))?;
+            }
+        }
+        // Append exactly once: the crash may have landed after the append.
+        let already = audit::read_lines(root)
+            .map_err(|e| DoctorError::Io(e.to_string()))?
+            .iter()
+            .filter_map(|l| serde_json::from_slice::<AuditEntry>(l).ok())
+            .any(|e| e.audit_id == marker.entry.audit_id);
+        if !already {
+            audit::append_line(root, &audit::canonical_line(&marker.entry))
+                .map_err(|e| DoctorError::Io(e.to_string()))?;
+        }
+        let _ = commit::remove_marker(root, marker);
+        Ok(Recovery::Completed {
+            transaction_id: marker.transaction_id.clone(),
+        })
+    } else {
+        // Roll back: drop temps, restore before-images where a rename landed.
+        // The manifest is always the last rename, so an incomplete commit
+        // still carries the pre-state manifest — it needs no restore.
+        for file in &marker.files {
+            if let Some(temp) = &file.temp_path {
+                let temp_abs = root.join(temp);
+                if temp_abs.exists() {
+                    fs::remove_file(&temp_abs).map_err(|e| DoctorError::Io(e.to_string()))?;
+                }
+            }
+            if matches!(file_state(root, file), FileState::InPlace) {
+                if let Some(change) = marker
+                    .entry
+                    .changes
+                    .iter()
+                    .find(|c| c.path.as_str() == file.path)
+                {
+                    let target = root.join(&file.path);
+                    match &change.before {
+                        Some(before) => {
+                            fs::write(&target, format_value(before))
+                                .map_err(|e| DoctorError::Io(e.to_string()))?;
+                        }
+                        None => {
+                            let _ = fs::remove_file(&target);
+                        }
+                    }
+                }
+            }
+        }
+        let _ = commit::remove_marker(root, marker);
+        Ok(Recovery::RolledBack {
+            transaction_id: marker.transaction_id.clone(),
+        })
+    }
+}
+
+/// List pending markers in name order (single writer ⇒ at most one in
+/// practice; the loop tolerates more).
+fn pending_markers(root: &Path) -> Result<Vec<PendingMarker>, DoctorError> {
+    let dir = root.join(audit::PENDING_DIR);
+    let mut out = Vec::new();
+    let read_dir = match fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(DoctorError::Io(e.to_string())),
+    };
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let bytes = fs::read(entry.path()).map_err(|e| DoctorError::Io(e.to_string()))?;
+        let marker: PendingMarker = serde_json::from_slice(&bytes)
+            .map_err(|e| DoctorError::Io(format!("unparseable marker {name}: {e}")))?;
+        out.push(marker);
+    }
+    out.sort_by(|a, b| a.transaction_id.cmp(&b.transaction_id));
+    Ok(out)
+}
+
+/// Build the `external_edit` entry that absorbs a hand edit (ADR-0006). The
+/// recorded diff is digests: `before` is the digest the manifest recorded,
+/// `after` the digest of the observed canonical bytes (or null when a file
+/// vanished). Runs through the same two-phase commit as any transaction.
+fn absorb_external_edit(
+    project: &Project,
+    integrity: &IntegrityError,
+) -> Result<AuditEntry, DoctorError> {
+    let mut digest_rows = Vec::new();
+    for path in &integrity.changed {
+        let before = project
+            .manifest
+            .files
+            .get(path)
+            .map(|s| json!(s.clone()))
+            .unwrap_or(serde_json::Value::Null);
+        let after = match project.files.get(path) {
+            Some(v) => json!(digest_of(&format_value(v))),
+            None => {
+                // A tracked file that vanished — manifest or lock changes show
+                // up here too; record their observed digest if readable.
+                match fs::read(project.root.join(path.as_str())) {
+                    Ok(bytes) => json!(digest_of(&bytes)),
+                    Err(_) => serde_json::Value::Null,
+                }
+            }
+        };
+        digest_rows.push(crate::op::FileChange {
+            path: path.clone(),
+            before: Some(before),
+            after: Some(after),
+        });
+    }
+    let entry = commit::run(
+        &project.root,
+        project,
+        &[],
+        &digest_rows,
+        project.manifest.stable_id_counter,
+        CommitMeta {
+            actor: "cli_local".into(),
+            op_id: "core.external_edit".into(),
+            op_version: 1,
+            input: json!({
+                "changed": integrity.changed.iter().map(|p| p.as_str()).collect::<Vec<_>>()
+            }),
+            plan_id: None,
+            capability: Capability::ProjectWrite.as_str().to_string(),
+            approval: "allow".into(),
+            rollback_of: None,
+            output: serde_json::Value::Null,
+        },
+    )?;
+    Ok(entry)
+}
+
+/// The full doctor pass. `absorb` permits the `external_edit` commit; without
+/// it an integrity failure is a refusal.
+pub fn run(
+    root: &Path,
+    absorb: bool,
+    validators: &[Box<dyn Validator>],
+) -> Result<DoctorReport, DoctorError> {
+    if absorb && is_read_only() {
+        return Err(DoctorError::ReadOnly);
+    }
+
+    // Load WITHOUT the hash check — doctor exists to look at broken state.
+    let project = Project::load_unverified(root)?;
+
+    // 1. Pending markers first — recovery may need the lock and is a write.
+    let mut recovered = None;
+    let markers = pending_markers(root)?;
+    if !markers.is_empty() {
+        if is_read_only() {
+            return Err(DoctorError::ReadOnly);
+        }
+        let _lock = lock_for(root)?;
+        for marker in &markers {
+            recovered = Some(resolve_marker(root, marker)?);
+        }
+        drop(_lock);
+    }
+
+    // 2. Audit chain + audit_head.
+    let entries = audit::verify_chain(root, project.manifest.audit_head.as_ref())?;
+
+    // 3. Load-time hash. On mismatch: refuse, or absorb under the lock.
+    let mut absorbed = None;
+    let mut findings = Vec::new();
+    match revision::verify(&project) {
+        Ok(()) => {}
+        Err(integrity) => {
+            if !absorb {
+                return Err(DoctorError::Integrity(integrity));
+            }
+            if is_read_only() {
+                return Err(DoctorError::ReadOnly);
+            }
+            let _lock = lock_for(root)?;
+            let entry = absorb_external_edit(&project, &integrity)?;
+            absorbed = Some(entry.audit_id.clone());
+            // Module validators observe the absorbed state; findings are
+            // reported as warnings and never block.
+            let absorbed_project = Project::load_unverified(root)?;
+            for v in validators {
+                findings.extend(v.run(&absorbed_project));
+            }
+            drop(_lock);
+            let _ = revision::verify(&absorbed_project).map_err(DoctorError::Integrity)?;
+        }
+    }
+
+    let blocking = findings.iter().any(|f| f.blocking);
+    Ok(DoctorReport {
+        recovered,
+        entries: entries.len() + absorbed.iter().count(),
+        absorbed,
+        findings,
+        blocking,
+    })
+}

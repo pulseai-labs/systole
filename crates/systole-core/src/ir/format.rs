@@ -21,6 +21,22 @@ pub fn format_value(value: &serde_json::Value) -> Vec<u8> {
     bytes
 }
 
+/// Serialize a JSON value to its compact canonical line form: the same sorted
+/// keys and numeric rules as `format_value`, but with no insignificant
+/// whitespace and no trailing newline. This is the audit log's serializer —
+/// `audit.jsonl` is outside the IR and the hash domain, and `format_line` is
+/// the only serializer that ever writes its entries.
+///
+/// ```
+/// use systole_core::ir::format::format_line;
+///
+/// let value = serde_json::json!({ "b": 1, "a": 2 });
+/// assert_eq!(format_line(&value), b"{\"a\":2,\"b\":1}".to_vec());
+/// ```
+pub fn format_line(value: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(value).expect("serializing a Value cannot fail")
+}
+
 /// Parse bytes as JSON and canonicalize them.
 pub fn canonicalize(bytes: &[u8]) -> Result<Vec<u8>, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;

@@ -6,10 +6,16 @@
 //! around them (revision binding, two-phase commit, audit append) is
 //! r0.s1.w2.
 
+pub mod audit;
 pub mod capability;
+pub mod doctor;
+pub mod engine;
 pub mod finding;
+#[cfg(feature = "fixture-ops")]
+pub mod fixture;
 pub mod ids;
 pub mod ir;
+pub mod lock;
 pub mod module;
 pub mod op;
 pub mod registry;
