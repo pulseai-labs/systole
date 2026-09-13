@@ -33,6 +33,17 @@ impl fmt::Display for RelPath {
     }
 }
 
+/// Whether `path` is a usable project-relative target: non-empty and built
+/// entirely of normal components — no root, no prefix, no `..` — so
+/// `root.join(path)` can never escape the project root. Every staged or
+/// replayed write path must pass this check before it is joined.
+pub fn is_project_relative(path: &str) -> bool {
+    !path.is_empty()
+        && std::path::Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 /// The file name of the project manifest inside a project root.
 pub const MANIFEST_FILE: &str = "project.systole.json";
 /// The file name of the lock inside a project root.

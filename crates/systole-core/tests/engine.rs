@@ -435,11 +435,65 @@ impl Operation for DelOp {
     }
 }
 
+/// A write op whose apply stages a path escaping the project root — the
+/// commit funnel must refuse before anything is written or a marker exists.
+#[derive(Default)]
+struct EscapeOp;
+
+impl Operation for EscapeOp {
+    type Request = EmptyReq;
+    type Plan = EmptyPlan;
+    type Output = EmptyOut;
+
+    const ID: &'static str = "test.escape";
+    const VERSION: u32 = 1;
+    const CAPABILITY: Capability = Capability::ProjectWrite;
+    const STABILITY: Stability = Stability::Internal;
+    const MUTABILITY: Mutability = Mutability::Write;
+
+    fn describe() -> OperationDescription {
+        OperationDescription {
+            id: Self::ID.into(),
+            version: Self::VERSION,
+            summary: "escape-path probe".into(),
+            input_schema: schemars::schema_for!(EmptyReq),
+            example: json!({}),
+            avoid_when: vec!["always".into()],
+        }
+    }
+    fn validate_request(&self, _req: &Self::Request) -> Result<(), OpError> {
+        Ok(())
+    }
+    fn materialize(&self, _p: &Project, _r: Self::Request) -> Result<Self::Plan, OpError> {
+        Ok(EmptyPlan {})
+    }
+    fn diff(&self, _p: &Project, _pl: &Self::Plan) -> Result<Diff, OpError> {
+        Ok(Diff {
+            changes: vec![FileChange {
+                path: RelPath::new("../escaped.txt"),
+                before: None,
+                after: Some(json!({ "escaped": true })),
+            }],
+        })
+    }
+    fn validate(&self, _p: &Project, _pl: &Self::Plan) -> Vec<Finding> {
+        Vec::new()
+    }
+    fn apply(&self, tx: &mut Transaction, _pl: Self::Plan) -> Result<Self::Output, OpError> {
+        tx.write(
+            RelPath::new("../escaped.txt"),
+            json!({ "escaped": true }),
+        );
+        Ok(EmptyOut {})
+    }
+}
+
 fn test_registry() -> Registry {
     let mut r = Registry::new();
     r.register::<NoteOp>();
     r.register::<NetOp>();
     r.register::<DelOp>();
+    r.register::<EscapeOp>();
     r
 }
 
@@ -1324,4 +1378,42 @@ fn an_interrupted_force_init_restores_the_displaced_tree_and_never_destroys_it()
     assert_eq!(fresh.manifest.project_revision, "rev_00000");
     assert!(!root.join("entities/note").exists());
     Project::load(&root).expect("force-replaced project verifies");
+}
+
+#[test]
+fn an_op_staging_an_escaping_path_is_refused_before_anything_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("proj");
+    Project::init(&root, false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(&root);
+    let outside = tmp.path().join("escaped.txt");
+
+    let req = PlanRequest {
+        op_id: "test.escape".into(),
+        op_version: 1,
+        input: json!({}),
+        actor: "cli_local".into(),
+    };
+    let plan = engine.materialize(&req).expect("materialize");
+    let result = engine.commit(&req, plan);
+    assert!(matches!(
+        result,
+        Err(EngineError::Commit(
+            two_phase::CommitError::PathEscapes { .. }
+        ))
+    ));
+
+    // The outside file was never created, no pending marker or temp was
+    // left behind, and the project still verifies at its old revision.
+    assert!(!outside.exists());
+    assert!(
+        two_phase::pending_marker_files(&root)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        engine.project().manifest.project_revision,
+        "rev_00000"
+    );
+    Project::load(&root).expect("project untouched by the refused commit");
 }

@@ -173,10 +173,7 @@ pub fn verify_chain(
         // Every recorded change target must stay inside the project: a forged
         // or corrupted line must not aim later renames outside the root.
         for change in &entry.changes {
-            let inside = !change.path.as_str().is_empty()
-                && std::path::Path::new(change.path.as_str())
-                    .components()
-                    .all(|c| matches!(c, std::path::Component::Normal(_)));
+            let inside = crate::ir::is_project_relative(change.path.as_str());
             if !inside {
                 return Err(ChainBreak {
                     index: i,

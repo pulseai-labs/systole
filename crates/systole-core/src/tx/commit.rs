@@ -48,6 +48,8 @@ pub enum CommitError {
              run `systole project doctor` to resolve them before any further \
              transaction")]
     PendingMarkers { count: usize },
+    #[error("staged path escapes the project root: {path:?}")]
+    PathEscapes { path: String },
     #[error("audit chain broken: {0}")]
     Chain(#[from] ChainBreak),
 }
@@ -120,6 +122,17 @@ pub fn plan_commit(
     meta: CommitMeta,
 ) -> Result<PreparedCommit, CommitError> {
     let _ = root;
+
+    // Every staged or recorded path must stay inside the project — a `..`
+    // or absolute target would let `root.join` below escape the root, so
+    // the whole transaction is refused before any marker or temp exists.
+    for change in writes.iter().chain(entry_changes) {
+        if !crate::ir::is_project_relative(change.path.as_str()) {
+            return Err(CommitError::PathEscapes {
+                path: change.path.as_str().to_string(),
+            });
+        }
+    }
 
     // 1. Post-state file map.
     let mut post_files: BTreeMap<RelPath, serde_json::Value> = project.files.clone();
@@ -303,13 +316,25 @@ pub fn write_marker(
     .map_err(io("audit/pending"))
 }
 
+/// Join a project-relative path onto `root`, refusing any path that would
+/// escape the project — the one gateway every write path funnels through.
+fn checked_join(root: &Path, rel: &str) -> Result<PathBuf, CommitError> {
+    if crate::ir::is_project_relative(rel) {
+        Ok(root.join(rel))
+    } else {
+        Err(CommitError::PathEscapes {
+            path: rel.to_string(),
+        })
+    }
+}
+
 /// Write every temp file beside its target. Each temp is fsynced — and its
 /// containing directory afterwards — so the `renaming` marker that follows is
 /// never written ahead of the bytes it describes.
 pub fn write_temps(root: &Path, prepared: &PreparedCommit) -> Result<(), CommitError> {
     let mut dirs = BTreeSet::new();
     for (temp, _target, bytes) in &prepared.temp_writes {
-        let abs = root.join(temp);
+        let abs = checked_join(root, temp)?;
         if let Some(parent) = abs.parent() {
             fs::create_dir_all(parent).map_err(io(temp))?;
         }
@@ -331,13 +356,13 @@ pub fn write_temps(root: &Path, prepared: &PreparedCommit) -> Result<(), CommitE
 /// null` entry deletes its target.
 pub fn apply_renames(root: &Path, prepared: &PreparedCommit) -> Result<(), CommitError> {
     for file in &prepared.marker.files {
-        let target = root.join(&file.path);
+        let target = checked_join(root, &file.path)?;
         match &file.temp_path {
             Some(temp) => {
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent).map_err(io(&file.path))?;
                 }
-                fs::rename(root.join(temp), &target).map_err(io(&file.path))?;
+                fs::rename(checked_join(root, temp)?, &target).map_err(io(&file.path))?;
             }
             None => match fs::remove_file(&target) {
                 Ok(()) => {}
@@ -350,7 +375,7 @@ pub fn apply_renames(root: &Path, prepared: &PreparedCommit) -> Result<(), Commi
     // fsynced — an unsynced rename can vanish across a crash.
     let mut dirs = BTreeSet::new();
     for file in &prepared.marker.files {
-        if let Some(parent) = root.join(&file.path).parent() {
+        if let Some(parent) = checked_join(root, &file.path)?.parent() {
             dirs.insert(parent.to_path_buf());
         }
     }

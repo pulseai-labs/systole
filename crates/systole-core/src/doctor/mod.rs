@@ -242,6 +242,21 @@ fn authenticate_marker(
 /// - anything else → roll back: remove temps, restore `before` images on files
 ///   already renamed — the manifest included — remove marker.
 fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, DoctorError> {
+    // The marker is untrusted input: a hand-edited `files` row must not aim
+    // a rename, delete, or restore outside the project root.
+    for file in &marker.files {
+        let escapes = !crate::ir::is_project_relative(&file.path)
+            || file
+                .temp_path
+                .as_deref()
+                .is_some_and(|t| !crate::ir::is_project_relative(t));
+        if escapes {
+            return Err(DoctorError::MarkerRejected(format!(
+                "{}: path escapes the project root: {}",
+                marker.transaction_id, file.path
+            )));
+        }
+    }
     // A torn final line (crash mid-append) is repaired against the marker's
     // claim before the tail is authenticated.
     repair_torn_tail(root, marker)?;
