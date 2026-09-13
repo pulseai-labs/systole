@@ -274,16 +274,16 @@ fn make(
 /// evidence saying the kernel cannot repair this state (reachable only
 /// through out-of-band edits).
 fn with_message(mut evidence: Value, unfixable: bool) -> Value {
-    if unfixable {
-        if let Some(map) = evidence.as_object_mut() {
-            map.insert(
-                "message".to_string(),
-                json!(
-                    "no suggested fix verified: this state cannot be repaired by a \
-                     single Release 0 operation — repair by hand or via `systole project doctor`"
-                ),
-            );
-        }
+    if unfixable
+        && let Some(map) = evidence.as_object_mut()
+    {
+        map.insert(
+            "message".to_string(),
+            json!(
+                "no suggested fix verified: this state cannot be repaired by a \
+                 single Release 0 operation — repair by hand or via `systole project doctor`"
+            ),
+        );
     }
     evidence
 }
@@ -545,7 +545,7 @@ fn minimal_path(
         let base = dist[&tile];
         for next in neighbours(view, tile) {
             let cost = base + u64::from(view.solid[next.1 as usize][next.0 as usize]);
-            if dist.get(&next).map_or(true, |d| cost < *d) {
+            if dist.get(&next).is_none_or(|d| cost < *d) {
                 dist.insert(next, cost);
                 parent.insert(next, tile);
                 if view.solid[next.1 as usize][next.0 as usize] {

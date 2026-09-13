@@ -180,7 +180,7 @@ fn audit_head_must_name_the_last_line() {
 
     let e1 = fake_entry(1, audit::GENESIS_PREV_HASH);
     let l1 = audit::canonical_line(&e1);
-    write_log(root, &[l1.clone()]);
+    write_log(root, std::slice::from_ref(&l1));
 
     // Head pointing at a different hash breaks.
     let wrong = AuditHead {

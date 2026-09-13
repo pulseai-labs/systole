@@ -1,5 +1,5 @@
 //! `systole.lock.json` — the resolved engine and module versions a project
-/// was last written against.
+//! was last written against.
 
 use std::collections::BTreeMap;
 

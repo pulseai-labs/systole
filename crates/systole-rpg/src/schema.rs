@@ -15,19 +15,14 @@ pub const MAX_REGION_DIMENSION: u32 = 256;
 pub const MAX_HANDLE_LEN: usize = 64;
 
 /// Cardinal facing for placements and entities.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Facing {
+    #[default]
     Down,
     Up,
     Left,
     Right,
-}
-
-impl Default for Facing {
-    fn default() -> Self {
-        Facing::Down
-    }
 }
 
 /// The five Release-0 terrain kinds. `wall` and `water` are solid by default;

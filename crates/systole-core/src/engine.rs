@@ -189,6 +189,13 @@ impl Engine {
         // under a different actor or before a policy change.
         let capability = self.check_policy(&plan.op_id, plan.op_version, &req.actor)?;
 
+        // The write lock comes before every read of mutable state: a
+        // concurrent commit must not land between the staleness check and the
+        // rename phase. Reload under the lock and validate against that
+        // snapshot, not the open-time one.
+        let _lock = self.acquire_lock()?;
+        self.project = Project::load(&self.root)?;
+
         // Stale-plan refusal: the plan is bound to the exact revision+hash it
         // was materialized against.
         let manifest = &self.project.manifest;
@@ -214,8 +221,6 @@ impl Engine {
             return Err(EngineError::Blocked(preview.findings));
         }
 
-        let _lock = self.acquire_lock()?;
-
         let mut tx = Transaction::new(&self.project);
         let output = self.registry.apply(&mut tx, plan.clone())?;
         let entry = commit::run(
@@ -236,7 +241,6 @@ impl Engine {
                 output,
             },
         )?;
-        drop(_lock);
 
         self.project = Project::load(&self.root)?;
         Ok(entry)
@@ -249,6 +253,11 @@ impl Engine {
         if is_read_only() {
             return Err(EngineError::ReadOnly);
         }
+
+        // The lock precedes the head-only check: a newer transaction must not
+        // commit between this check and the compensating one.
+        let _lock = self.acquire_lock()?;
+        self.project = Project::load(&self.root)?;
 
         let head = self
             .project
@@ -294,7 +303,6 @@ impl Engine {
             })
             .collect();
 
-        let _lock = self.acquire_lock()?;
         let entry = commit::run(
             &self.root,
             &self.project,
@@ -313,7 +321,6 @@ impl Engine {
                 output: serde_json::Value::Null,
             },
         )?;
-        drop(_lock);
 
         self.project = Project::load(&self.root)?;
         Ok(entry)

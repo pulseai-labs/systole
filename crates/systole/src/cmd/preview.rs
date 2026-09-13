@@ -32,7 +32,7 @@ pub fn resolve(
             };
             let plan = engine
                 .materialize(&req)
-                .map_err(|e| EngineErr::Engine(e))?;
+                .map_err(EngineErr::Engine)?;
             Ok((req, plan))
         }
         None => {

@@ -127,9 +127,10 @@ impl Operation for MarkWarp {
     fn validate(&self, project: &Project, plan: &Self::Plan) -> Vec<Finding> {
         let mut findings = Vec::new();
         let region_path = schema::region_path(&plan.region_stable_id);
-        if let Some(region) = project.files.get(&region_path) {
-            if let Some(warps) = region["warps"].as_array() {
-                for warp in warps {
+        if let Some(region) = project.files.get(&region_path)
+            && let Some(warps) = region["warps"].as_array()
+        {
+            for warp in warps {
                     let same_tile = warp["at"]
                         .as_array()
                         .and_then(|a| {
@@ -150,7 +151,6 @@ impl Operation for MarkWarp {
                             Vec::new(),
                         ));
                     }
-                }
             }
         }
         if plan.to.region_stable_id.is_none() {

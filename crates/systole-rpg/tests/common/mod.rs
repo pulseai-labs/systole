@@ -145,10 +145,10 @@ fn collect_stable_ids(value: &Value, max: &mut u64) {
     match value {
         Value::Object(map) => {
             for (key, v) in map {
-                if key == "stable_id" || key == "region_stable_id" {
-                    if let Some(n) = v.as_str().and_then(suffix_number) {
-                        *max = (*max).max(n);
-                    }
+                if (key == "stable_id" || key == "region_stable_id")
+                    && let Some(n) = v.as_str().and_then(suffix_number)
+                {
+                    *max = (*max).max(n);
                 }
                 collect_stable_ids(v, max);
             }

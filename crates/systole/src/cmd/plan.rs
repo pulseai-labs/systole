@@ -195,7 +195,7 @@ fn write_and_report(
     origin: Option<(&str, usize)>,
 ) -> i32 {
     let path = out
-        .map(|p| absolutize(p))
+        .map(absolutize)
         .unwrap_or_else(|| root.join("plans").join(format!("{}.json", plan.plan_id)));
     if let Err(m) = write_plan_file(&path, &PlanFile { request: req, plan: plan.clone() }) {
         eprintln!("{m}");

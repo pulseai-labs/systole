@@ -90,13 +90,13 @@ impl Operation for CreateRegion {
                 ),
             ));
         }
-        if let Some(fill) = &req.fill {
-            if schema::Terrain::from_kind(fill).is_none() {
-                return Err(invalid(
-                    codes::UNKNOWN_TERRAIN,
-                    format!("unknown terrain kind {fill:?}"),
-                ));
-            }
+        if let Some(fill) = &req.fill
+            && schema::Terrain::from_kind(fill).is_none()
+        {
+            return Err(invalid(
+                codes::UNKNOWN_TERRAIN,
+                format!("unknown terrain kind {fill:?}"),
+            ));
         }
         Ok(())
     }

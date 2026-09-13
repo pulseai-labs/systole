@@ -64,13 +64,13 @@ impl Operation for PaintPath {
     }
 
     fn validate_request(&self, req: &Self::Request) -> Result<(), OpError> {
-        if let Some(terrain) = &req.terrain {
-            if schema::Terrain::from_kind(terrain).is_none() {
-                return Err(invalid(
-                    codes::UNKNOWN_TERRAIN,
-                    format!("unknown terrain kind {terrain:?}"),
-                ));
-            }
+        if let Some(terrain) = &req.terrain
+            && schema::Terrain::from_kind(terrain).is_none()
+        {
+            return Err(invalid(
+                codes::UNKNOWN_TERRAIN,
+                format!("unknown terrain kind {terrain:?}"),
+            ));
         }
         Ok(())
     }

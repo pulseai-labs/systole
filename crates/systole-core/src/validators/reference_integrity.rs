@@ -70,12 +70,12 @@ impl Validator for ReferenceIntegrity {
                 }
                 // A region's `warps[].stable_id` entries are declared inline —
                 // registered here and excluded from the reference walk.
-                if *kind == "region" {
-                    if let Some(warps) = value.get("warps").and_then(Value::as_array) {
-                        for warp in warps {
-                            if let Some(w) = warp.get("stable_id").and_then(Value::as_str) {
-                                declared.insert(w.to_string(), ());
-                            }
+                if *kind == "region"
+                    && let Some(warps) = value.get("warps").and_then(Value::as_array)
+                {
+                    for warp in warps {
+                        if let Some(w) = warp.get("stable_id").and_then(Value::as_str) {
+                            declared.insert(w.to_string(), ());
                         }
                     }
                 }
@@ -101,24 +101,24 @@ impl Validator for ReferenceIntegrity {
                 ));
                 continue;
             }
-            if let Some(expected) = expected_prefix(&field) {
-                if id_prefix(&referenced) != Some(expected) {
-                    findings.push(object_finding(
-                        CODE_KIND_MISMATCH,
-                        own_id.as_deref(),
-                        &path,
-                        json!({
-                            "pointer": pointer,
-                            "value": referenced,
-                            "expected_kind": expected,
-                            "actual_kind": id_prefix(&referenced),
-                            "message": format!(
-                                "no suggested fix: stable-id references cannot be repaired by a \
-                                 Release 0 operation — repair {path} by hand or via `systole project doctor`"
-                            ),
-                        }),
-                    ));
-                }
+            if let Some(expected) = expected_prefix(&field)
+                && id_prefix(&referenced) != Some(expected)
+            {
+                findings.push(object_finding(
+                    CODE_KIND_MISMATCH,
+                    own_id.as_deref(),
+                    &path,
+                    json!({
+                        "pointer": pointer,
+                        "value": referenced,
+                        "expected_kind": expected,
+                        "actual_kind": id_prefix(&referenced),
+                        "message": format!(
+                            "no suggested fix: stable-id references cannot be repaired by a \
+                             Release 0 operation — repair {path} by hand or via `systole project doctor`"
+                        ),
+                    }),
+                ));
             }
         }
 

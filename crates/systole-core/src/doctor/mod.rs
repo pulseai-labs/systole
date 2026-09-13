@@ -90,15 +90,15 @@ fn file_state(root: &Path, file: &commit::PendingFile) -> FileState {
         Some(temp) => {
             let target = root.join(&file.path);
             let expected = file.expected_post_hash.as_deref().unwrap_or("");
-            if let Ok(bytes) = fs::read(&target) {
-                if digest_of(&bytes) == expected {
-                    return FileState::InPlace;
-                }
+            if let Ok(bytes) = fs::read(&target)
+                && digest_of(&bytes) == expected
+            {
+                return FileState::InPlace;
             }
-            if let Ok(bytes) = fs::read(root.join(temp)) {
-                if digest_of(&bytes) == expected {
-                    return FileState::Staged;
-                }
+            if let Ok(bytes) = fs::read(root.join(temp))
+                && digest_of(&bytes) == expected
+            {
+                return FileState::Staged;
             }
             FileState::Incomplete
         }
