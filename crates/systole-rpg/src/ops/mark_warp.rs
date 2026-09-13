@@ -101,7 +101,22 @@ impl Operation for MarkWarp {
                 ),
             ));
         }
-        let target_stable_id = schema::find_region(project, &req.to.region).map(|(sid, _)| sid);
+        let target = schema::find_region(project, &req.to.region);
+        // A resolved destination region makes the explicit landing point
+        // checkable now — bounds-checked like the source tile.
+        if let (Some(at), Some((_, target_region))) = (req.to.at, target.as_ref()) {
+            let (width, height) = schema::region_size(target_region);
+            if !schema::point_inside(at[0], at[1], width, height) {
+                return Err(invalid(
+                    codes::POINT_OUT_OF_BOUNDS,
+                    format!(
+                        "destination point ({},{}) is outside region {:?} bounds {}x{}",
+                        at[0], at[1], req.to.region, width, height
+                    ),
+                ));
+            }
+        }
+        let target_stable_id = target.map(|(sid, _)| sid);
         Ok(MarkWarpPlan {
             region: req.region,
             region_stable_id: stable_id,

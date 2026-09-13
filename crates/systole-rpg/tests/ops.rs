@@ -274,6 +274,32 @@ fn mark_warp_unresolved_target_is_non_blocking() {
     assert_eq!(out.output["stable_id"], json!("warp_00002"));
 }
 
+#[test]
+fn mark_warp_refuses_a_destination_outside_the_target_region() {
+    let mut project = common::project();
+    common::run(
+        &mut project,
+        "rpg.create_region",
+        json!({"id": "town", "width": 16, "height": 16}),
+    )
+    .unwrap();
+    common::run(
+        &mut project,
+        "rpg.create_region",
+        json!({"id": "route_1", "width": 4, "height": 4}),
+    )
+    .unwrap();
+    let refused = common::run(
+        &mut project,
+        "rpg.mark_warp",
+        json!({"region": "town", "at": [15, 8], "to": {"region": "route_1", "at": [9, 9]}}),
+    );
+    assert!(
+        matches!(refused, Err(OpError::InvalidRequest(_))),
+        "expected an invalid-request refusal"
+    );
+}
+
 /// The written entity carries every ADR-0003 field, and the region's
 /// `placements` hold its `at` (the entity itself has no coordinates).
 #[test]

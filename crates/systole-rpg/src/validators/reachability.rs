@@ -24,6 +24,9 @@ pub const CODE_UNREACHABLE_NPC: &str = "rpg.reachability.unreachable_npc";
 pub const CODE_UNREACHABLE_WARP: &str = "rpg.reachability.unreachable_warp";
 pub const CODE_ON_SOLID_TILE: &str = "rpg.placement.on_solid_tile";
 pub const CODE_DANGLING_TARGET: &str = "rpg.warp.dangling_target";
+/// A warp's explicit destination is inside a region that exists but cannot be
+/// reached there — out-of-bounds or walled off from that region's spawn.
+pub const CODE_UNREACHABLE_DESTINATION: &str = "rpg.warp.unreachable_destination";
 
 /// The validator carries the registry that materializes and applies its
 /// suggested fixes — the fix contract needs the real dispatch path, not a
@@ -52,6 +55,10 @@ struct Target {
 
 /// A region's walkable view: the collision layer's effective rows plus the
 /// region body's spawn and targets.
+/// One warp on a region: stable id, source tile, target handle, and the
+/// optional landing point inside the target region.
+type WarpView = (String, (u32, u32), String, Option<(u32, u32)>);
+
 struct RegionView {
     stable_id: String,
     handle: String,
@@ -61,8 +68,9 @@ struct RegionView {
     spawn: (u32, u32),
     solid: Vec<Vec<bool>>,
     targets: Vec<Target>,
-    /// `(warp stable_id, at, to.region_id)` rows for the dangling check.
-    warps: Vec<(String, (u32, u32), String)>,
+    /// `(warp stable_id, at, to.region_id, to.at)` rows — the dangling check
+    /// uses the region handle, the destination check the optional point.
+    warps: Vec<WarpView>,
 }
 
 impl Validator for Reachability {
@@ -72,9 +80,12 @@ impl Validator for Reachability {
 
     fn run(&self, project: &Project) -> Vec<Finding> {
         let mut findings = Vec::new();
-        for view in regions(project) {
-            let reached = bfs_reached(&view);
-            if solid_at(&view, view.spawn) {
+        let views = regions(project);
+        let mut dest_reach: std::collections::BTreeMap<String, BTreeSet<(u32, u32)>> =
+            std::collections::BTreeMap::new();
+        for view in &views {
+            let reached = bfs_reached(view);
+            if solid_at(view, view.spawn) {
                 let location = Location {
                     stable_id: Some(view.stable_id.clone()),
                     path: Some(view.path.clone()),
@@ -96,7 +107,7 @@ impl Validator for Reachability {
                 ));
             }
             for target in &view.targets {
-                if inside(&view, target.at)
+                if inside(view, target.at)
                     && view.solid[target.at.1 as usize][target.at.0 as usize]
                 {
                     let code = CODE_ON_SOLID_TILE;
@@ -104,7 +115,7 @@ impl Validator for Reachability {
                         stable_id: Some(view.stable_id.clone()),
                         path: Some(view.path.clone()),
                     };
-                    let evidence = target_evidence(target, &view);
+                    let evidence = target_evidence(target, view);
                     let fixes = self.verified_fixes(
                         project,
                         vec![collision_fix(&view.handle, target.at, 1, 1)],
@@ -130,8 +141,8 @@ impl Validator for Reachability {
                         stable_id: Some(view.stable_id.clone()),
                         path: Some(view.path.clone()),
                     };
-                    let evidence = reach_evidence(target, &view, reached.len());
-                    let candidates = repair_candidates(&view, &reached, target.at);
+                    let evidence = reach_evidence(target, view, reached.len());
+                    let candidates = repair_candidates(view, &reached, target.at);
                     let fixes =
                         self.verified_fixes(project, candidates, code, &location, &evidence);
                     findings.push(make(
@@ -143,7 +154,7 @@ impl Validator for Reachability {
                     ));
                 }
             }
-            for (warp_stable_id, at, target_region_id) in &view.warps {
+            for (warp_stable_id, at, target_region_id, dest_at) in &view.warps {
                 // W4-A1: dangling iff no region carries the `to.region_id`
                 // handle. The stored `to.region_stable_id` stays null after a
                 // `create_region` fix (no Release 0 op rewrites a warp), so the
@@ -180,6 +191,37 @@ impl Validator for Reachability {
                         with_message(evidence, fixes.is_empty()),
                         fixes,
                     ));
+                } else if let Some(dest) = dest_at {
+                    // The destination must be a reachable landing inside the
+                    // resolved region — out-of-bounds or walled off from that
+                    // region's spawn. Advisory: no Release 0 op rewrites a warp.
+                    if let Some(dest_view) = views.iter().find(|v| v.handle == *target_region_id)
+                    {
+                        let dest_reached = dest_reach
+                            .entry(target_region_id.clone())
+                            .or_insert_with(|| bfs_reached(dest_view));
+                        if !dest_reached.contains(dest) {
+                            let location = Location {
+                                stable_id: Some(view.stable_id.clone()),
+                                path: Some(view.path.clone()),
+                            };
+                            findings.push(make(
+                                CODE_UNREACHABLE_DESTINATION,
+                                false,
+                                location,
+                                with_message(
+                                    json!({
+                                        "warp_stable_id": warp_stable_id,
+                                        "at": [at.0, at.1],
+                                        "target_region_id": target_region_id,
+                                        "destination_at": [dest.0, dest.1],
+                                    }),
+                                    true,
+                                ),
+                                Vec::new(),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -387,7 +429,11 @@ fn regions(project: &Project) -> Vec<RegionView> {
                     .and_then(|to| to.get("region_id"))
                     .and_then(Value::as_str)
                 {
-                    warps.push((stable_id.clone(), at, target_region_id.to_string()));
+                    let dest_at = warp
+                        .get("to")
+                        .and_then(|to| to.get("at"))
+                        .and_then(|v| point(Some(v)));
+                    warps.push((stable_id.clone(), at, target_region_id.to_string(), dest_at));
                 }
                 targets.push(Target {
                     is_warp: true,
@@ -749,6 +795,44 @@ mod tests {
             .run(&staged)
             .iter()
             .any(|g| g.code == CODE_UNREACHABLE_NPC));
+    }
+
+    #[test]
+    fn a_warp_destination_point_is_checked_for_reachability() {
+        // route_1 (region_00002, 4x4 grass) with a single solid tile at (3,3);
+        // town's warp lands exactly there.
+        let terrain = schema::terrain_file(4, 4, schema::Terrain::Grass);
+        let mut collision = schema::collision_file(4, 4, &terrain);
+        schema::apply_collision_override(&mut collision, 3, 3, 1, 1, true);
+        let mut p = town(&BTreeSet::new(), None, None);
+        p.files.insert(
+            RelPath::new("regions/region_00002/region.json"),
+            schema::region_file("route_1", "region_00002", 4, 4, [1, 1]),
+        );
+        p.files.insert(
+            RelPath::new("regions/region_00002/layers/terrain.json"),
+            terrain,
+        );
+        p.files.insert(
+            RelPath::new("regions/region_00002/layers/collision.json"),
+            collision,
+        );
+        p.files
+            .get_mut(&RelPath::new("regions/region_00001/region.json"))
+            .unwrap()["warps"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "stable_id": "warp_00003",
+                "at": [15, 8],
+                "to": {"region_id": "route_1", "region_stable_id": "region_00002", "at": [3, 3]}
+            }));
+        let findings = validator().run(&p);
+        assert_eq!(codes(&findings), vec![CODE_UNREACHABLE_DESTINATION]);
+        assert!(
+            !findings[0].blocking,
+            "an unreachable destination stays advisory"
+        );
     }
 
     #[test]
