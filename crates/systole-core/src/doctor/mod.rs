@@ -24,7 +24,7 @@ use crate::ir::manifest::Manifest;
 use crate::ir::project::{Project, ProjectError};
 use crate::ir::writer::{sync_dir, write_atomic};
 use crate::ids::StableId;
-use crate::ir::MANIFEST_FILE;
+use crate::ir::{LOCK_FILE, MANIFEST_FILE};
 use crate::lock::{LockError, WriteLock};
 use crate::module::Validator;
 use crate::revision::{self, digest_of, IntegrityError};
@@ -457,14 +457,21 @@ fn absorb_external_edit(
             .get(path)
             .map(|s| json!(s.clone()))
             .unwrap_or(serde_json::Value::Null);
-        let after = match project.files.get(path) {
-            Some(v) => json!(digest_of(&format_value(v))),
-            None => {
-                // A tracked file that vanished — manifest or lock changes show
-                // up here too; record their observed digest if readable.
-                match fs::read(project.root.join(path.as_str())) {
-                    Ok(bytes) => json!(digest_of(&bytes)),
-                    Err(_) => serde_json::Value::Null,
+        let after = if path.as_str() == LOCK_FILE {
+            // The lock lives in `project.lock`, not `project.files`: the
+            // recorded digest is of the canonical bytes the commit leaves
+            // on disk — the same bytes `refresh_integrity` will hash.
+            json!(digest_of(&project.lock_bytes()))
+        } else {
+            match project.files.get(path) {
+                Some(v) => json!(digest_of(&format_value(v))),
+                None => {
+                    // A tracked file that vanished — manifest changes show up
+                    // here too; record their observed digest if readable.
+                    match fs::read(project.root.join(path.as_str())) {
+                        Ok(bytes) => json!(digest_of(&bytes)),
+                        Err(_) => serde_json::Value::Null,
+                    }
                 }
             }
         };
@@ -484,7 +491,16 @@ fn absorb_external_edit(
         .map(|path| crate::op::FileChange {
             path: path.clone(),
             before: None,
-            after: project.files.get(path).cloned(),
+            // The lock is stored on `project.lock`, not `project.files` —
+            // staging `None` here would DELETE the file the committed
+            // manifest's digest table still records, leaving the project
+            // unloadable. Stage its canonical serialization instead, exactly
+            // as `write_all` produces it.
+            after: if path.as_str() == LOCK_FILE {
+                Some(serde_json::to_value(&project.lock).expect("lock serializes"))
+            } else {
+                project.files.get(path).cloned()
+            },
         })
         .collect();
     let entry = commit::run(

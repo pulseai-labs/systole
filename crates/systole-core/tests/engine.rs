@@ -805,6 +805,40 @@ fn absorb_records_an_external_edit_entry_and_restores_verification() {
 }
 
 #[test]
+fn absorb_recanonicalizes_a_reformatted_lock_without_deleting_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(tmp.path());
+    apply_note(&mut engine, "hello");
+    drop(engine);
+
+    // Whitespace-only hand edit of the lock: parseable and semantically
+    // identical, but byte-different — the load-time check reports it.
+    let lock_path = tmp.path().join(systole_core::ir::LOCK_FILE);
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    std::fs::write(&lock_path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(matches!(
+        Project::load(tmp.path()),
+        Err(ProjectError::Integrity(_))
+    ));
+
+    let report = doctor::run(tmp.path(), true, &[]).expect("absorb runs");
+    assert!(report.absorbed.is_some());
+
+    // The lock is still on disk, canonicalized, and the committed manifest's
+    // digest row names exactly the bytes present — not a tombstone.
+    let project = Project::load(tmp.path()).expect("absorbed state verifies");
+    let recorded = &project.manifest.files[&RelPath::new(systole_core::ir::LOCK_FILE)];
+    assert_eq!(*recorded, digest_of(&std::fs::read(&lock_path).unwrap()));
+
+    // A subsequent engine open and commit succeed with the lock present.
+    let mut engine = open_engine(tmp.path());
+    apply_note(&mut engine, "after");
+    assert!(lock_path.exists());
+}
+
+#[test]
 fn commit_refuses_a_plan_whose_request_does_not_match() {
     let tmp = tempfile::tempdir().unwrap();
     Project::init(tmp.path(), false, &rpg_modules()).unwrap();
