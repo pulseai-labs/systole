@@ -22,7 +22,7 @@ use crate::finding::Finding;
 use crate::ir::format::format_value;
 use crate::ir::manifest::Manifest;
 use crate::ir::project::{Project, ProjectError};
-use crate::ir::writer::write_atomic;
+use crate::ir::writer::{sync_dir, write_atomic};
 use crate::ir::MANIFEST_FILE;
 use crate::lock::{LockError, WriteLock};
 use crate::module::Validator;
@@ -117,6 +117,48 @@ fn file_state(root: &Path, file: &commit::PendingFile) -> FileState {
     }
 }
 
+/// Repair a torn final audit line before the marker it belongs to is
+/// resolved. A crash mid-append leaves a non-empty log without a trailing
+/// newline; the fragment must be a prefix of the marker's claimed entry —
+/// anything else means the tail cannot be authenticated and is refused. A
+/// matching fragment is truncated so the complete path can re-append the
+/// entry canonically.
+fn repair_torn_tail(root: &Path, marker: &PendingMarker) -> Result<(), DoctorError> {
+    let path = root.join(audit::LOG_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(DoctorError::Io(e.to_string())),
+    };
+    if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+        return Ok(());
+    }
+    let boundary = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let fragment = &bytes[boundary..];
+    let expected = audit::canonical_line(&marker.entry);
+    if !expected.as_slice().starts_with(fragment) {
+        return Err(DoctorError::MarkerRejected(format!(
+            "{}: torn final audit line does not match the marker's entry",
+            marker.transaction_id
+        )));
+    }
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .map_err(|e| DoctorError::Io(e.to_string()))?;
+    file.set_len(boundary as u64)
+        .map_err(|e| DoctorError::Io(e.to_string()))?;
+    file.sync_all().map_err(|e| DoctorError::Io(e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent).map_err(|e| DoctorError::Io(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Authenticate a marker's claims against the verified log tail and the
 /// on-disk manifest before executing anything it says. A marker is just a
 /// file under audit/pending — anything could have written it — so:
@@ -199,6 +241,9 @@ fn authenticate_marker(
 /// - anything else → roll back: remove temps, restore `before` images on files
 ///   already renamed — the manifest included — remove marker.
 fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, DoctorError> {
+    // A torn final line (crash mid-append) is repaired against the marker's
+    // claim before the tail is authenticated.
+    repair_torn_tail(root, marker)?;
     let lines = audit::read_lines(root).map_err(|e| DoctorError::Io(e.to_string()))?;
     let appended = authenticate_marker(root, marker, &lines)?;
     let states: Vec<FileState> = marker
@@ -211,6 +256,7 @@ fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, Docto
         .all(|s| matches!(s, FileState::InPlace | FileState::Staged));
 
     if completable {
+        let mut dirs = std::collections::BTreeSet::new();
         for (file, state) in marker.files.iter().zip(&states) {
             if let (Some(temp), FileState::Staged) = (&file.temp_path, state) {
                 let target = root.join(&file.path);
@@ -219,7 +265,13 @@ fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, Docto
                 }
                 fs::rename(root.join(temp), &target)
                     .map_err(|e| DoctorError::Io(e.to_string()))?;
+                if let Some(parent) = target.parent() {
+                    dirs.insert(parent.to_path_buf());
+                }
             }
+        }
+        for dir in dirs {
+            sync_dir(&dir).map_err(|e| DoctorError::Io(e.to_string()))?;
         }
         // Append exactly once: the crash may have landed after the append.
         let already = audit::read_lines(root)

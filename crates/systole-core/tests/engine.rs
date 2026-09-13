@@ -984,3 +984,114 @@ fn doctor_completes_a_post_append_crash_without_double_appending() {
     Project::load(tmp.path()).expect("completed state verifies");
 }
 
+#[test]
+fn doctor_repairs_a_torn_final_audit_line_and_completes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let engine = open_engine(tmp.path());
+    let req = note_req("torn");
+    let plan = engine.materialize(&req).unwrap();
+    let mut tx = Transaction::new(engine.project());
+    let output = engine.registry().apply(&mut tx, plan.clone()).unwrap();
+    drop(engine);
+
+    let prepared = two_phase::plan_commit(
+        tmp.path(),
+        &project,
+        tx.staged(),
+        tx.staged(),
+        tx.stable_id_counter(),
+        two_phase::CommitMeta {
+            actor: "cli_local".into(),
+            op_id: plan.op_id.clone(),
+            op_version: plan.op_version,
+            input: req.input.clone(),
+            plan_id: Some(plan.plan_id.clone()),
+            capability: "project.write".into(),
+            approval: "allow".into(),
+            rollback_of: None,
+            output,
+        },
+    )
+    .unwrap();
+    let mut marker = prepared.marker.clone();
+    two_phase::write_marker(tmp.path(), &mut marker, "prepared").unwrap();
+    two_phase::write_temps(tmp.path(), &prepared).unwrap();
+    two_phase::write_marker(tmp.path(), &mut marker, "renaming").unwrap();
+    two_phase::apply_renames(tmp.path(), &prepared).unwrap();
+    // Crash mid-append: only a fragment of the entry's line landed, with no
+    // trailing newline.
+    let line = audit::canonical_line(&marker.entry);
+    let torn = &line[..line.len() - 12];
+    use std::io::Write;
+    let mut log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(tmp.path().join("audit/audit.jsonl"))
+        .unwrap();
+    log.write_all(torn).unwrap();
+    drop(log);
+
+    let report = doctor::run(tmp.path(), false, &[]).expect("doctor resolves");
+    assert!(matches!(
+        report.recovered,
+        Some(doctor::Recovery::Completed { .. })
+    ));
+    let lines = audit::read_lines(tmp.path()).unwrap();
+    assert_eq!(lines.len(), 1, "the entry is appended exactly once");
+    assert_eq!(
+        lines[0],
+        line,
+        "the torn fragment was replaced by the canonical line"
+    );
+    Project::load(tmp.path()).expect("repaired state verifies");
+}
+
+#[test]
+fn doctor_refuses_a_torn_line_that_is_not_the_markers_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let engine = open_engine(tmp.path());
+    let req = note_req("alien");
+    let plan = engine.materialize(&req).unwrap();
+    let mut tx = Transaction::new(engine.project());
+    let output = engine.registry().apply(&mut tx, plan.clone()).unwrap();
+    drop(engine);
+
+    let prepared = two_phase::plan_commit(
+        tmp.path(),
+        &project,
+        tx.staged(),
+        tx.staged(),
+        tx.stable_id_counter(),
+        two_phase::CommitMeta {
+            actor: "cli_local".into(),
+            op_id: plan.op_id.clone(),
+            op_version: plan.op_version,
+            input: req.input.clone(),
+            plan_id: Some(plan.plan_id.clone()),
+            capability: "project.write".into(),
+            approval: "allow".into(),
+            rollback_of: None,
+            output,
+        },
+    )
+    .unwrap();
+    let mut marker = prepared.marker.clone();
+    two_phase::write_marker(tmp.path(), &mut marker, "renaming").unwrap();
+    // A torn tail that is not a prefix of the claimed entry.
+    use std::io::Write;
+    let mut log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(tmp.path().join("audit/audit.jsonl"))
+        .unwrap();
+    log.write_all(b"{\"audit_id\":\"aud_xx").unwrap();
+    drop(log);
+
+    let result = doctor::run(tmp.path(), false, &[]);
+    assert!(
+        matches!(result, Err(doctor::DoctorError::MarkerRejected(_))),
+        "an alien torn line is refused, got ok={}",
+        result.is_ok()
+    );
+}
+

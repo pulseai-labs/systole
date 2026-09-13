@@ -18,8 +18,9 @@
 //! leaves the old manifest in place until every data file has landed — a
 //! recoverable-by-construction crash window.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ use crate::audit::{self, AuditEntry, ChainBreak};
 use crate::ir::format::format_value;
 use crate::ir::manifest::{AuditHead, Manifest};
 use crate::ir::project::Project;
-use crate::ir::writer::write_atomic;
+use crate::ir::writer::{sync_dir, write_atomic};
 use crate::ir::{RelPath, LOCK_FILE, MANIFEST_FILE};
 use crate::op::FileChange;
 use crate::revision::{self, digest_of, project_hash};
@@ -302,14 +303,26 @@ pub fn write_marker(
     .map_err(io("audit/pending"))
 }
 
-/// Write every temp file beside its target.
+/// Write every temp file beside its target. Each temp is fsynced — and its
+/// containing directory afterwards — so the `renaming` marker that follows is
+/// never written ahead of the bytes it describes.
 pub fn write_temps(root: &Path, prepared: &PreparedCommit) -> Result<(), CommitError> {
+    let mut dirs = BTreeSet::new();
     for (temp, _target, bytes) in &prepared.temp_writes {
         let abs = root.join(temp);
         if let Some(parent) = abs.parent() {
             fs::create_dir_all(parent).map_err(io(temp))?;
         }
-        fs::write(&abs, bytes).map_err(io(temp))?;
+        let mut file = fs::File::create(&abs).map_err(io(temp))?;
+        file.write_all(bytes).map_err(io(temp))?;
+        file.sync_all().map_err(io(temp))?;
+        if let Some(parent) = abs.parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+    }
+    for dir in dirs {
+        let label = dir.display().to_string();
+        sync_dir(&dir).map_err(io(&label))?;
     }
     Ok(())
 }
@@ -333,6 +346,18 @@ pub fn apply_renames(root: &Path, prepared: &PreparedCommit) -> Result<(), Commi
             },
         }
     }
+    // The renames are only durable once every directory they touched is
+    // fsynced — an unsynced rename can vanish across a crash.
+    let mut dirs = BTreeSet::new();
+    for file in &prepared.marker.files {
+        if let Some(parent) = root.join(&file.path).parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+    }
+    for dir in dirs {
+        let label = dir.display().to_string();
+        sync_dir(&dir).map_err(io(&label))?;
+    }
     Ok(())
 }
 
@@ -345,10 +370,14 @@ pub fn append_entry(root: &Path, entry: &AuditEntry) -> Result<(), CommitError> 
 pub fn remove_marker(root: &Path, marker: &PendingMarker) -> Result<(), CommitError> {
     let path = marker_path(root, &marker.transaction_id);
     match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(io("audit/pending")(e)),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io("audit/pending")(e)),
     }
+    if let Some(parent) = path.parent() {
+        sync_dir(parent).map_err(io("audit/pending"))?;
+    }
+    Ok(())
 }
 
 /// Run the whole two-phase commit. Returns the appended entry.

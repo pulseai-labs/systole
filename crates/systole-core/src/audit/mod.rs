@@ -99,7 +99,9 @@ pub fn read_lines(root: &Path) -> std::io::Result<Vec<Vec<u8>>> {
         .collect())
 }
 
-/// Append one canonical line (plus its newline) to the log.
+/// Append one canonical line (plus its newline) to the log. The append is
+/// fsynced, and the containing directory after it — the commit protocol's
+/// marker/temp/rename/append ordering only holds if each step is durable.
 pub fn append_line(root: &Path, line: &[u8]) -> std::io::Result<()> {
     let path = root.join(LOG_FILE);
     if let Some(parent) = path.parent() {
@@ -108,6 +110,10 @@ pub fn append_line(root: &Path, line: &[u8]) -> std::io::Result<()> {
     let mut file = fs::OpenOptions::new().create(true).append(true).open(&path)?;
     file.write_all(line)?;
     file.write_all(b"\n")?;
+    file.sync_all()?;
+    if let Some(parent) = path.parent() {
+        crate::ir::writer::sync_dir(parent)?;
+    }
     Ok(())
 }
 
