@@ -1587,3 +1587,140 @@ fn an_idempotent_commit_stages_nothing_and_appends_no_audit_entry() {
     );
     Project::load(&root).expect("unchanged project verifies");
 }
+/// chmod the pending dir read-only so `remove_marker`'s unlink fails, run a
+/// closure, and restore writability — the TempDir cleanup needs it back.
+#[cfg(unix)]
+fn with_readonly_pending(root: &std::path::Path, f: impl FnOnce()) {
+    use std::os::unix::fs::PermissionsExt;
+    let pending = root.join("audit/pending");
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o555)).unwrap();
+    f();
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The prepared marker + committed state for a completable recovery: marker
+/// and temps written, renames applied — every post-state file in place.
+#[cfg(unix)]
+fn staged_completed_marker(
+    root: &std::path::Path,
+    project: &Project,
+    req: &PlanRequest,
+    plan: &systole_core::op::OperationPlan,
+    engine: &Engine,
+) -> two_phase::PendingMarker {
+    let mut tx = Transaction::new(engine.project());
+    let output = engine.registry().apply(&mut tx, plan.clone()).unwrap();
+    let prepared = two_phase::plan_commit(
+        root,
+        project,
+        tx.staged(),
+        tx.staged(),
+        tx.stable_id_counter(),
+        two_phase::CommitMeta {
+            actor: "cli_local".into(),
+            op_id: plan.op_id.clone(),
+            op_version: plan.op_version,
+            input: req.input.clone(),
+            plan_id: Some(plan.plan_id.clone()),
+            capability: "project.write".into(),
+            approval: "allow".into(),
+            rollback_of: None,
+            output,
+        },
+    )
+    .unwrap();
+    let mut marker = prepared.marker.clone();
+    two_phase::write_marker(root, &mut marker, "prepared").unwrap();
+    two_phase::write_temps(root, &prepared).unwrap();
+    two_phase::write_marker(root, &mut marker, "renaming").unwrap();
+    two_phase::apply_renames(root, &prepared).unwrap();
+    marker
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fails_loudly_when_marker_removal_fails_after_completion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let engine = open_engine(tmp.path());
+    let req = note_req("hello");
+    let plan = engine.materialize(&req).unwrap();
+    let marker = staged_completed_marker(tmp.path(), &project, &req, &plan, &engine);
+    drop(engine);
+
+    let txid = marker.transaction_id.clone();
+    let mut result = None;
+    with_readonly_pending(tmp.path(), || {
+        result = Some(doctor::run(tmp.path(), false, &[]));
+    });
+    match result.unwrap() {
+        Err(e) => {
+            let text = e.to_string();
+            assert!(
+                text.contains(&txid),
+                "the refusal names the marker: {text}"
+            );
+        }
+        Ok(_) => panic!("doctor must fail when the marker unlink fails"),
+    }
+
+    // The marker survives: the next engine open refuses PendingTransactions.
+    assert!(two_phase::marker_path(tmp.path(), &txid).exists());
+    assert!(matches!(
+        Engine::open(tmp.path(), test_registry()),
+        Err(EngineError::PendingTransactions { .. })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fails_loudly_when_marker_removal_fails_after_rollback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let engine = open_engine(tmp.path());
+    let req = note_req("hello");
+    let plan = engine.materialize(&req).unwrap();
+    let mut tx = Transaction::new(engine.project());
+    let output = engine.registry().apply(&mut tx, plan.clone()).unwrap();
+    drop(engine);
+
+    // Incomplete transaction: marker only, no temps — doctor rolls back.
+    let prepared = two_phase::plan_commit(
+        tmp.path(),
+        &project,
+        tx.staged(),
+        tx.staged(),
+        tx.stable_id_counter(),
+        two_phase::CommitMeta {
+            actor: "cli_local".into(),
+            op_id: plan.op_id.clone(),
+            op_version: plan.op_version,
+            input: req.input.clone(),
+            plan_id: Some(plan.plan_id.clone()),
+            capability: "project.write".into(),
+            approval: "allow".into(),
+            rollback_of: None,
+            output,
+        },
+    )
+    .unwrap();
+    let mut marker = prepared.marker.clone();
+    two_phase::write_marker(tmp.path(), &mut marker, "prepared").unwrap();
+    let txid = marker.transaction_id.clone();
+
+    let mut result = None;
+    with_readonly_pending(tmp.path(), || {
+        result = Some(doctor::run(tmp.path(), false, &[]));
+    });
+    match result.unwrap() {
+        Err(e) => {
+            let text = e.to_string();
+            assert!(
+                text.contains(&txid),
+                "the refusal names the marker: {text}"
+            );
+        }
+        Ok(_) => panic!("doctor must fail when the marker unlink fails"),
+    }
+    assert!(two_phase::marker_path(tmp.path(), &txid).exists());
+}

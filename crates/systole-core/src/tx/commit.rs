@@ -403,13 +403,16 @@ pub fn append_entry(root: &Path, entry: &AuditEntry) -> Result<(), CommitError> 
 /// Remove the pending marker.
 pub fn remove_marker(root: &Path, marker: &PendingMarker) -> Result<(), CommitError> {
     let path = marker_path(root, &marker.transaction_id);
+    // The error names the marker itself — doctor propagates it so a failed
+    // unlink surfaces as a refusal, never a silent success.
+    let label = path.display().to_string();
     match fs::remove_file(&path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io("audit/pending")(e)),
+        Err(e) => return Err(io(&label)(e)),
     }
     if let Some(parent) = path.parent() {
-        sync_dir(parent).map_err(io("audit/pending"))?;
+        sync_dir(parent).map_err(io(&label))?;
     }
     Ok(())
 }

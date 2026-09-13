@@ -299,7 +299,10 @@ fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, Docto
             audit::append_line(root, &audit::canonical_line(&marker.entry))
                 .map_err(|e| DoctorError::Io(e.to_string()))?;
         }
-        let _ = commit::remove_marker(root, marker);
+        // A failed unlink must surface: reporting success while the marker
+        // remains would leave every later engine command refusing with
+        // PendingTransactions after the user was told recovery succeeded.
+        commit::remove_marker(root, marker)?;
         Ok(Recovery::Completed {
             transaction_id: marker.transaction_id.clone(),
         })
@@ -368,7 +371,10 @@ fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, Docto
             }
             None => {}
         }
-        let _ = commit::remove_marker(root, marker);
+        // A failed unlink must surface: reporting success while the marker
+        // remains would leave every later engine command refusing with
+        // PendingTransactions after the user was told recovery succeeded.
+        commit::remove_marker(root, marker)?;
         Ok(Recovery::RolledBack {
             transaction_id: marker.transaction_id.clone(),
         })
@@ -483,9 +489,15 @@ fn absorb_external_edit(
                 None => {
                     // A tracked file that vanished — manifest changes show up
                     // here too; record their observed digest if readable.
-                    match fs::read(project.root.join(path.as_str())) {
-                        Ok(bytes) => json!(digest_of(&bytes)),
-                        Err(_) => serde_json::Value::Null,
+                    // The path comes from the manifest's files table: a
+                    // hand-edited manifest could aim the read outside the
+                    // root, so only project-relative paths are followed.
+                    let readable = crate::ir::is_project_relative(path.as_str())
+                        .then(|| fs::read(project.root.join(path.as_str())))
+                        .and_then(Result::ok);
+                    match readable {
+                        Some(bytes) => json!(digest_of(&bytes)),
+                        None => serde_json::Value::Null,
                     }
                 }
             }
