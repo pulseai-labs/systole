@@ -21,6 +21,7 @@ use crate::engine::is_read_only;
 use crate::finding::Finding;
 use crate::ir::format::format_value;
 use crate::ir::project::{Project, ProjectError};
+use crate::ir::writer::write_atomic;
 use crate::lock::{LockError, WriteLock};
 use crate::module::Validator;
 use crate::revision::{self, digest_of, IntegrityError};
@@ -173,7 +174,7 @@ fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, Docto
                     let target = root.join(&file.path);
                     match &change.before {
                         Some(before) => {
-                            fs::write(&target, format_value(before))
+                            write_atomic(&target, &format_value(before))
                                 .map_err(|e| DoctorError::Io(e.to_string()))?;
                         }
                         None => {

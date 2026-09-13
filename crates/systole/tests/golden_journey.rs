@@ -1,6 +1,6 @@
-//! The Release-0 golden journey as a standing regression test (r0.s1.w5,
-//! ledger line d3, release exit criterion 4): MASTER-SPEC §2 steps 1–10
-//! driven through the built `systole` binary — init, catalog discovery, the
+//! The Release-0 golden journey as a standing regression test (r0.s1.w5):
+//! the ten documented journey steps driven through the built `systole`
+//! binary — init, catalog discovery, the
 //! 16×16 town through preview and apply, the NPC sealed inside a collision
 //! ring, the reachability finding repaired through `plan --from-finding`,
 //! a benign transaction rolled back byte-identically, a refused hand edit

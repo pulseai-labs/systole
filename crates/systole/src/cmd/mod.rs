@@ -50,10 +50,9 @@ pub fn module_validators() -> Vec<Box<dyn systole_core::module::Validator>> {
 }
 
 /// The kill switch (risk gate `ir-integrity`): `SYSTOLE_READ_ONLY=1` refuses
-/// every write path without a rebuild.
-pub fn is_read_only() -> bool {
-    std::env::var("SYSTOLE_READ_ONLY").as_deref() == Ok("1")
-}
+/// every write path without a rebuild. One definition, in the engine — the
+/// CLI re-exports it so the predicate cannot drift between crates.
+pub use systole_core::engine::is_read_only;
 
 /// Resolve a project root in ADR-0001 order: `--project`, `$SYSTOLE_PROJECT`,
 /// the current directory.
