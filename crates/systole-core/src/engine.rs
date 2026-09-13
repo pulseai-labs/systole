@@ -199,9 +199,10 @@ impl Engine {
                 req.op_id, req.op_version, plan.op_id, plan.op_version
             )));
         }
-        if expected_plan_id(req, &plan.base_project_revision) != plan.plan_id {
+        if expected_plan_id(req, &plan) != plan.plan_id {
             return Err(EngineError::InvalidRequest(
-                "plan_id does not match this request and base revision".into(),
+                "plan_id does not match this request, payload, and version stamps"
+                    .into(),
             ));
         }
 
@@ -243,6 +244,39 @@ impl Engine {
                 ),
                 hint: "re-run systole plan against the current revision".into(),
             });
+        }
+
+        // Version stamps: a plan materialized by another engine build or
+        // module set must not apply under this one.
+        let running_engine = crate::ir::manifest::engine_version();
+        if plan.engine_version != running_engine {
+            return Err(EngineError::InvalidRequest(format!(
+                "plan was materialized by engine {0}; running engine is {1}",
+                plan.engine_version, running_engine
+            )));
+        }
+        let current_modules: std::collections::BTreeMap<String, String> = self
+            .project
+            .manifest
+            .modules
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.version.clone()))
+            .collect();
+        if plan.module_versions != current_modules {
+            return Err(EngineError::InvalidRequest(
+                "plan module versions do not match the project's module set".into(),
+            ));
+        }
+
+        // The staleness check above proved the project is still in the
+        // plan's base state, so re-materializing the recorded request must
+        // reproduce the payload exactly — a hand-edited payload in a saved
+        // plan refuses here rather than applying unvalidated.
+        let rematerialized = self.registry.materialize(&self.project, req)?;
+        if rematerialized.payload != plan.payload {
+            return Err(EngineError::InvalidRequest(
+                "plan payload does not match the recorded request".into(),
+            ));
         }
 
         // Preview again: blocking findings refuse before anything is staged.

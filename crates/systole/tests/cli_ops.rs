@@ -219,6 +219,73 @@ fn a_plan_file_whose_request_disagrees_is_refused_as_invalid_request() {
 }
 
 #[test]
+fn a_plan_file_whose_payload_was_edited_is_refused_as_invalid_request() {
+    let (_g, root) = init_project("w2-paytamper");
+    let plan_file = root.join("plan.json");
+
+    let plan = on(
+        &root,
+        &[
+            "plan",
+            "fixture.put_note",
+            "--input",
+            r#"{"text":"hello"}"#,
+            "--out",
+            plan_file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(plan.status.code(), Some(0));
+
+    // Tamper the saved PAYLOAD — the request envelope stays untouched, so
+    // only the payload binding in plan_id and the re-materialization check
+    // catch it.
+    let mut saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_file).unwrap()).unwrap();
+    saved["plan"]["payload"]["text"] = serde_json::json!("smuggled");
+    std::fs::write(&plan_file, serde_json::to_string(&saved).unwrap()).unwrap();
+
+    let out = on(&root, &["--json", "apply", plan_file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(envelope["error"]["code"], "op.invalid_request");
+    assert_eq!(audit_line_count(&root), 0, "a refused commit appends nothing");
+    assert!(!root.join("entities/note/ent_00001.json").exists());
+}
+
+#[test]
+fn a_plan_file_from_another_engine_version_is_refused() {
+    let (_g, root) = init_project("w2-vertamper");
+    let plan_file = root.join("plan.json");
+
+    let plan = on(
+        &root,
+        &[
+            "plan",
+            "fixture.put_note",
+            "--input",
+            r#"{"text":"hello"}"#,
+            "--out",
+            plan_file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(plan.status.code(), Some(0));
+
+    // A plan stamped by another engine build must not apply under this one —
+    // the version is bound into plan_id, so fix the id up to isolate the
+    // explicit version check... actually just tamper the version: plan_id
+    // mismatch already refuses as invalid_request.
+    let mut saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_file).unwrap()).unwrap();
+    saved["plan"]["engine_version"] = serde_json::json!("0.0.0-prerelease");
+    std::fs::write(&plan_file, serde_json::to_string(&saved).unwrap()).unwrap();
+
+    let out = on(&root, &["--json", "apply", plan_file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(envelope["error"]["code"], "op.invalid_request");
+}
+
+#[test]
 fn rollback_restores_files_and_appends_a_compensating_entry() {
     let (_g, root) = init_project("w2-rb");
     let apply = on(

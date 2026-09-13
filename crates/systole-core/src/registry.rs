@@ -8,6 +8,7 @@ use std::marker::PhantomData;
 
 use crate::capability::Capability;
 use crate::finding::Finding;
+use crate::ir::format::format_value;
 use crate::ir::project::Project;
 use crate::op::{
     Diff, Mutability, Operation, OperationDescription, OperationPlan, OpError, PlanRequest,
@@ -170,19 +171,39 @@ impl Default for Registry {
 }
 
 /// A deterministic plan id: nothing random names a plan (ADR-0010). Derived
-/// from the envelope and the base revision, so the same request against the
-/// same project yields the same plan id.
-fn plan_id(req: &PlanRequest, base_revision: &str) -> String {
+/// from the envelope, the base revision, the materialized payload, and the
+/// engine/module versions — the same request against the same project yields
+/// the same plan id, and a hand-edited payload in a saved plan file can no
+/// longer match it.
+fn plan_id(
+    req: &PlanRequest,
+    base_revision: &str,
+    payload: &serde_json::Value,
+    engine_version: &str,
+    module_versions: &BTreeMap<String, String>,
+) -> String {
     let mut domain = serde_json::to_vec(req).expect("envelope serializes");
     domain.extend_from_slice(base_revision.as_bytes());
+    domain.extend_from_slice(&format_value(payload));
+    domain.extend_from_slice(engine_version.as_bytes());
+    domain.extend_from_slice(&format_value(
+        &serde_json::to_value(module_versions).expect("module versions serialize"),
+    ));
     format!("plan_{}", &sha256_hex(&domain)[..16])
 }
 
-/// The plan id a given request would receive against a given base revision —
-/// the same deterministic derivation `materialize` uses, exposed so the engine
-/// can verify a stored plan file still matches its request envelope.
-pub fn expected_plan_id(req: &PlanRequest, base_revision: &str) -> String {
-    plan_id(req, base_revision)
+/// The plan id a given request would receive for the given plan contents —
+/// the same deterministic derivation `materialize` uses, exposed so the
+/// engine can verify a stored plan file still matches its request envelope,
+/// payload, and version stamps.
+pub fn expected_plan_id(req: &PlanRequest, plan: &OperationPlan) -> String {
+    plan_id(
+        req,
+        &plan.base_project_revision,
+        &plan.payload,
+        &plan.engine_version,
+        &plan.module_versions,
+    )
 }
 
 trait ErasedOperation: Send + Sync {
@@ -229,19 +250,27 @@ impl<O: Operation + 'static> ErasedOperation for OpEntry<O> {
         let plan = self.op.materialize(project, request)?;
         let payload =
             serde_json::to_value(&plan).map_err(|e| OpError::Materialize(e.to_string()))?;
+        let engine_version = project.manifest.engine.version.clone();
+        let module_versions: BTreeMap<String, String> = project
+            .manifest
+            .modules
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.version.clone()))
+            .collect();
         Ok(OperationPlan {
-            plan_id: plan_id(req, &project.manifest.project_revision),
+            plan_id: plan_id(
+                req,
+                &project.manifest.project_revision,
+                &payload,
+                &engine_version,
+                &module_versions,
+            ),
             op_id: req.op_id.clone(),
             op_version: req.op_version,
             base_project_revision: project.manifest.project_revision.clone(),
             base_project_hash: project.manifest.project_hash.clone(),
-            engine_version: project.manifest.engine.version.clone(),
-            module_versions: project
-                .manifest
-                .modules
-                .iter()
-                .map(|(id, entry)| (id.clone(), entry.version.clone()))
-                .collect(),
+            engine_version,
+            module_versions,
             payload,
         })
     }
