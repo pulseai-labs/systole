@@ -6,8 +6,10 @@ mod common;
 
 use serde_json::{json, Value};
 use systole_core::ir::format::format_value;
+use systole_core::module::Validator;
 use systole_core::op::{OpError, PlanRequest};
 use systole_rpg::schema;
+use systole_rpg::validators::reachability::{Reachability, CODE_INVALID_DIMENSIONS};
 
 /// Every `describe().example` is a valid request: it survives its own
 /// `validate_request` on the real dispatch path (materialize for writes,
@@ -396,4 +398,38 @@ fn catalog_rows_sort_across_op_kinds() {
     assert_eq!(ids, sorted, "catalog order must be deterministic");
     let at = ids.iter().position(|id| id == "rpg.query_region").unwrap();
     assert!(at == 5, "query_region sorts between place_npc and set_collision");
+}
+
+/// A region whose hand-edited dimensions exceed the module's bounds is
+/// refused by the validator with a blocking finding — never by allocating a
+/// width-by-height grid.
+#[test]
+fn a_region_with_absurd_dimensions_is_refused_without_allocating() {
+    let mut project = common::project();
+    common::run(
+        &mut project,
+        "rpg.create_region",
+        json!({"id": "town", "width": 8, "height": 8}),
+    )
+    .expect("create_region applies");
+
+    // Simulate the absorbed hand-edit: absurd dimensions land in the IR.
+    let path = project
+        .files
+        .keys()
+        .find(|p| p.as_str().starts_with("regions/") && p.as_str().ends_with("region.json"))
+        .cloned()
+        .expect("region file exists");
+    let mut region = project.files.get(&path).unwrap().clone();
+    region["width"] = json!(100000);
+    region["height"] = json!(100000);
+    project.files.insert(path, region);
+
+    let findings = Reachability::new(common::registry()).run(&project);
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.code == CODE_INVALID_DIMENSIONS && f.blocking),
+        "expected a blocking invalid-dimensions finding, got {findings:?}"
+    );
 }

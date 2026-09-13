@@ -159,11 +159,18 @@ pub fn find_entity_by_stable_id<'p>(project: &'p Project, stable_id: &str) -> Op
     })
 }
 
-/// The region's `(width, height)` from its `region.json` value.
+/// The region's `(width, height)` from its `region.json` value. Saturating:
+/// a value beyond u32 must not wrap into a small, plausible dimension.
 pub fn region_size(region: &Value) -> (u32, u32) {
     (
-        region["width"].as_u64().unwrap_or(0) as u32,
-        region["height"].as_u64().unwrap_or(0) as u32,
+        region["width"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(u64::from(u32::MAX)) as u32,
+        region["height"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(u64::from(u32::MAX)) as u32,
     )
 }
 

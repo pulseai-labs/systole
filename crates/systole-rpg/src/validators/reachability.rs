@@ -27,6 +27,9 @@ pub const CODE_DANGLING_TARGET: &str = "rpg.warp.dangling_target";
 /// A warp's explicit destination is inside a region that exists but cannot be
 /// reached there — out-of-bounds or walled off from that region's spawn.
 pub const CODE_UNREACHABLE_DESTINATION: &str = "rpg.warp.unreachable_destination";
+/// A region declaring dimensions outside the module's bounds — refused
+/// before any width-by-height grid is allocated.
+pub const CODE_INVALID_DIMENSIONS: &str = "rpg.region.invalid_dimensions";
 
 /// The validator carries the registry that materializes and applies its
 /// suggested fixes — the fix contract needs the real dispatch path, not a
@@ -87,8 +90,7 @@ impl Reachability {
     // The validator walk. depth bounds verified_fixes recursion: a
     // fix-check re-run produces findings only, keeping validate linear.
     fn run_inner(&self, project: &Project, depth: u32) -> Vec<Finding> {
-        let mut findings = Vec::new();
-        let views = regions(project);
+        let (views, mut findings) = regions(project);
         let mut dest_reach: std::collections::BTreeMap<String, BTreeSet<(u32, u32)>> =
             std::collections::BTreeMap::new();
         for view in &views {
@@ -368,8 +370,9 @@ fn reach_evidence(target: &Target, view: &RegionView, reached: usize) -> Value {
 
 /// Every `regions/<sid>/region.json` whose `kind` is `region`, in path order
 /// (the project's BTreeMap keeps the walk deterministic).
-fn regions(project: &Project) -> Vec<RegionView> {
+fn regions(project: &Project) -> (Vec<RegionView>, Vec<Finding>) {
     let mut out = Vec::new();
+    let mut invalid = Vec::new();
     for (path, value) in &project.files {
         let segs: Vec<&str> = path.as_str().split('/').collect();
         let ["regions", sid, "region.json"] = segs.as_slice() else {
@@ -379,6 +382,33 @@ fn regions(project: &Project) -> Vec<RegionView> {
             continue;
         }
         let (width, height) = schema::region_size(value);
+        // A hand-edited or imported region can declare dimensions far past
+        // MAX_REGION_DIMENSION — refuse it with a blocking finding rather
+        // than allocating a width-by-height grid (memory exhaustion).
+        if width == 0
+            || height == 0
+            || width > schema::MAX_REGION_DIMENSION
+            || height > schema::MAX_REGION_DIMENSION
+        {
+            invalid.push(make(
+                CODE_INVALID_DIMENSIONS,
+                true,
+                Location {
+                    stable_id: Some(sid.to_string()),
+                    path: Some(path.clone()),
+                },
+                with_message(
+                    json!({
+                        "width": width,
+                        "height": height,
+                        "max": schema::MAX_REGION_DIMENSION,
+                    }),
+                    true,
+                ),
+                Vec::new(),
+            ));
+            continue;
+        }
         let spawn = point(value.get("spawn")).unwrap_or((0, 0));
         let collision = project
             .files
@@ -474,7 +504,7 @@ fn regions(project: &Project) -> Vec<RegionView> {
             warps,
         });
     }
-    out
+    (out, invalid)
 }
 
 fn point(value: Option<&Value>) -> Option<(u32, u32)> {
