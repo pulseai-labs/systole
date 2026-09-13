@@ -1276,3 +1276,52 @@ fn absorb_marks_validator_findings_advisory_and_flags_noncanonical_files() {
     // Absorb rewrote the file to canonical form: the project verifies.
     Project::load(tmp.path()).expect("absorbed state verifies canonically");
 }
+
+#[test]
+fn an_interrupted_force_init_restores_the_displaced_tree_and_never_destroys_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("proj");
+    Project::init(&root, false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(&root);
+    apply_note(&mut engine, "original");
+    drop(engine);
+
+    // Simulated crash between the two renames of `init --force`: the old
+    // tree sits whole under the trash name and the root is missing.
+    let parent = root.parent().unwrap();
+    let staging = parent.join(".systole-init-staging-proj");
+    let trash = parent.join(".systole-init-trash-proj");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::rename(&root, &trash).unwrap();
+
+    // The next init restores the displaced tree before doing anything else,
+    // drops the stale staging dir, and refuses the restored non-empty root.
+    assert!(matches!(
+        Project::init(&root, false, &rpg_modules()),
+        Err(ProjectError::NonEmpty { .. })
+    ));
+    assert!(root.join("entities/note/ent_00001.json").exists());
+    assert!(!staging.exists());
+    Project::load(&root).expect("restored tree verifies");
+
+    // A parked trash beside a live root refuses loudly — the displaced
+    // originals are never deleted by a later run.
+    std::fs::rename(&root, &trash).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("stray"), b"x").unwrap();
+    assert!(matches!(
+        Project::init(&root, true, &rpg_modules()),
+        Err(ProjectError::InterruptedReplace { .. })
+    ));
+    assert!(trash.join("entities/note/ent_00001.json").exists());
+    assert!(root.join("stray").exists());
+    std::fs::remove_dir_all(&root).unwrap();
+
+    // Once the collision is resolved by hand, force-init proceeds normally:
+    // the old tree is replaced as one unit.
+    std::fs::rename(&trash, &root).unwrap();
+    let fresh = Project::init(&root, true, &rpg_modules()).unwrap();
+    assert_eq!(fresh.manifest.project_revision, "rev_00000");
+    assert!(!root.join("entities/note").exists());
+    Project::load(&root).expect("force-replaced project verifies");
+}

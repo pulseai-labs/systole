@@ -43,6 +43,11 @@ pub enum ProjectError {
     NonEmpty { dir: String },
     #[error("not a directory: {path}")]
     NotADirectory { path: String },
+    #[error(
+        "refused: an interrupted `init --force` left a displaced project tree \
+         at {trash} — move it aside or restore it before retrying"
+    )]
+    InterruptedReplace { trash: String },
     #[error(transparent)]
     Integrity(#[from] revision::IntegrityError),
 }
@@ -68,6 +73,9 @@ impl Project {
     /// Create a new project at `root` (refusing a non-empty directory unless
     /// `force`), writing the full Release-0 layout at `rev_00000`.
     pub fn init(root: &Path, force: bool, modules: &[ModuleManifest]) -> Result<Project, ProjectError> {
+        // Resolve leftovers of an interrupted forced init before anything
+        // reads or writes the tree — see `resolve_interrupted_replace`.
+        Self::resolve_interrupted_replace(root)?;
         let dir = root.display().to_string();
         let mut replace = false;
         match fs::symlink_metadata(root) {
@@ -152,66 +160,74 @@ impl Project {
     }
 
     /// `init --force` on a non-empty directory: the fresh layout is built in
-    /// a sibling staging directory first, then every managed path is swapped
-    /// in by rename — never written over the old tree in place. The previous
-    /// tree moves aside wholesale and is deleted only after the replacement
-    /// completes, so an existing audit log is never truncated mid-init and
-    /// stale IR files cannot survive into the fresh project.
+    /// a sibling staging directory first, then published by two root-level
+    /// renames — the old tree moves aside whole, the staged tree moves in.
+    /// The mid-swap window is one rename wide: a crash inside it leaves the
+    /// displaced tree whole under `trash` for the next init to resolve (see
+    /// `resolve_interrupted_replace`) — never a half-mixed tree with no
+    /// recovery record, and never deleted before recovery is possible.
     fn init_replacing(root: &Path, modules: &[ModuleManifest]) -> Result<Project, ProjectError> {
         let dir = root.display().to_string();
-        let parent = root.parent().unwrap_or_else(|| Path::new("."));
-        let pid = std::process::id();
-        let staging = parent.join(format!(".systole-init-staging-{pid}"));
-        let trash = parent.join(format!(".systole-init-trash-{pid}"));
-        // Leftovers from a crashed earlier run.
-        for scratch in [&staging, &trash] {
-            if scratch.exists() {
-                fs::remove_dir_all(scratch).map_err(|e| io(&dir, e))?;
-            }
+        let (staging, trash) = Self::scratch_paths(root);
+        // A leftover staging dir only ever holds generated content.
+        if staging.exists() {
+            fs::remove_dir_all(&staging).map_err(|e| io(&dir, e))?;
         }
         // A complete, verified fresh project beside the target — same
         // filesystem, so every rename below is atomic.
         Self::init(&staging, false, modules)?;
-        fs::create_dir_all(&trash).map_err(|e| io(&dir, e))?;
+        // The single destructive step: the whole old tree moves aside in one
+        // rename, then the staged layout moves in — the displaced originals
+        // sit whole under `trash` until the fresh layout is fully in place.
+        fs::rename(root, &trash).map_err(|e| io(&dir, e))?;
+        if let Err(source) = fs::rename(&staging, root) {
+            // Best effort: put the displaced tree back so a failed publish
+            // never strands the originals in the trash dir.
+            let _ = fs::rename(&trash, root);
+            return Err(io(&dir, source));
+        }
+        fs::remove_dir_all(&trash).map_err(|e| io(&dir, e))?;
+        let parent = root.parent().unwrap_or_else(|| Path::new("."));
+        let _ = sync_dir(parent);
+        Project::load(root)
+    }
 
-        // Every path init manages, at the project root's top level.
-        const MANAGED: [&str; 6] = [
-            "audit",
-            "plans",
-            "regions",
-            "entities",
-            MANIFEST_FILE,
-            LOCK_FILE,
-        ];
-        let mut moved: Vec<&str> = Vec::new();
-        for rel in MANAGED {
-            let current = root.join(rel);
-            let incoming = staging.join(rel);
-            let step = (|| -> std::io::Result<()> {
-                if fs::symlink_metadata(&current).is_ok() {
-                    fs::rename(&current, trash.join(rel))?;
-                }
-                fs::rename(&incoming, &current)
-            })();
-            match step {
-                Ok(()) => {
-                    if trash.join(rel).exists() {
-                        moved.push(rel);
-                    }
-                }
-                Err(source) => {
-                    // Best effort: put back whatever was moved aside.
-                    for prev in &moved {
-                        let _ = fs::rename(trash.join(prev), root.join(prev));
-                    }
-                    return Err(io(rel, source));
-                }
+    /// The sibling scratch dirs a replacing init uses, named for the target
+    /// so an interrupted run is resolvable by the next one.
+    fn scratch_paths(root: &Path) -> (PathBuf, PathBuf) {
+        let parent = root.parent().unwrap_or_else(|| Path::new("."));
+        let base = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "project".to_string());
+        (
+            parent.join(format!(".systole-init-staging-{base}")),
+            parent.join(format!(".systole-init-trash-{base}")),
+        )
+    }
+
+    /// Resolve leftovers of an interrupted `init --force`. A leftover staging
+    /// dir holds only generated content and is dropped. A leftover trash dir
+    /// holds the displaced originals: restored when the root is missing (the
+    /// swap crashed between its two renames), refused over when the root
+    /// exists — a later init never destroys the displaced originals before
+    /// recovery is possible.
+    fn resolve_interrupted_replace(root: &Path) -> Result<(), ProjectError> {
+        let dir = root.display().to_string();
+        let (staging, trash) = Self::scratch_paths(root);
+        if trash.exists() {
+            if fs::symlink_metadata(root).is_err() {
+                fs::rename(&trash, root).map_err(|e| io(&dir, e))?;
+            } else {
+                return Err(ProjectError::InterruptedReplace {
+                    trash: trash.display().to_string(),
+                });
             }
         }
-        let _ = fs::remove_dir_all(&trash);
-        let _ = fs::remove_dir_all(&staging);
-        let _ = sync_dir(root);
-        Project::load(root)
+        if staging.exists() {
+            fs::remove_dir_all(&staging).map_err(|e| io(&dir, e))?;
+        }
+        Ok(())
     }
 
     /// Read and verify a project from disk. Fails with
