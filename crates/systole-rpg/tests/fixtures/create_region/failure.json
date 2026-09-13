@@ -1,0 +1,13 @@
+{
+  "setup": [
+    {
+      "op_id": "rpg.create_region",
+      "input": { "id": "town", "width": 16, "height": 16 }
+    }
+  ],
+  "request": { "id": "town", "width": 8, "height": 8 },
+  "expect": {
+    "ok": false,
+    "error_code": "rpg.region.duplicate_id"
+  }
+}

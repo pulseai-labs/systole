@@ -1,0 +1,13 @@
+{
+  "setup": [
+    {
+      "op_id": "rpg.create_region",
+      "input": { "id": "town", "width": 16, "height": 16 }
+    }
+  ],
+  "request": { "region": "town", "id": "elder", "at": [99, 3] },
+  "expect": {
+    "ok": false,
+    "error_code": "spatial.point_out_of_bounds"
+  }
+}

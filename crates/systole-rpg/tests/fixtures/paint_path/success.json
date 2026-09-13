@@ -1,0 +1,18 @@
+{
+  "setup": [
+    {
+      "op_id": "rpg.create_region",
+      "input": { "id": "town", "width": 16, "height": 16 }
+    }
+  ],
+  "request": { "region": "town", "from": [1, 1], "to": [4, 3] },
+  "expect": {
+    "ok": true,
+    "output": { "tiles_changed": 6 },
+    "files": [
+      "regions/region_00001/layers/terrain.json",
+      "regions/region_00001/layers/collision.json"
+    ],
+    "findings": []
+  }
+}

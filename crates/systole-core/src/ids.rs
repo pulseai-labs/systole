@@ -12,6 +12,7 @@ pub enum IdKind {
     Ent,
     Region,
     Flag,
+    Warp,
 }
 
 impl IdKind {
@@ -20,6 +21,7 @@ impl IdKind {
             IdKind::Ent => "ent",
             IdKind::Region => "region",
             IdKind::Flag => "flag",
+            IdKind::Warp => "warp",
         }
     }
 }
@@ -69,6 +71,7 @@ impl TryFrom<String> for StableId {
             "ent" => IdKind::Ent,
             "region" => IdKind::Region,
             "flag" => IdKind::Flag,
+            "warp" => IdKind::Warp,
             _ => return Err(StableIdParseError(s)),
         };
         Ok(StableId { kind, n })
@@ -103,5 +106,9 @@ mod tests {
         assert_eq!(id.n, 7);
         assert_eq!(id.to_string(), "region_00007");
         assert!(StableId::try_from("nope".to_string()).is_err());
+
+        let warp = StableId::try_from("warp_00003".to_string()).unwrap();
+        assert_eq!(warp.kind, IdKind::Warp);
+        assert_eq!(warp.to_string(), "warp_00003");
     }
 }
