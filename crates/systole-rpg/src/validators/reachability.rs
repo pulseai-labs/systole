@@ -79,6 +79,14 @@ impl Validator for Reachability {
     }
 
     fn run(&self, project: &Project) -> Vec<Finding> {
+        self.run_inner(project, 0)
+    }
+}
+
+impl Reachability {
+    // The validator walk. depth bounds verified_fixes recursion: a
+    // fix-check re-run produces findings only, keeping validate linear.
+    fn run_inner(&self, project: &Project, depth: u32) -> Vec<Finding> {
         let mut findings = Vec::new();
         let views = regions(project);
         let mut dest_reach: std::collections::BTreeMap<String, BTreeSet<(u32, u32)>> =
@@ -97,6 +105,7 @@ impl Validator for Reachability {
                     CODE_SPAWN_BLOCKED,
                     &location,
                     &evidence,
+                    depth,
                 );
                 findings.push(make(
                     CODE_SPAWN_BLOCKED,
@@ -122,6 +131,7 @@ impl Validator for Reachability {
                         code,
                         &location,
                         &evidence,
+                        depth,
                     );
                     findings.push(make(
                         code,
@@ -144,7 +154,7 @@ impl Validator for Reachability {
                     let evidence = reach_evidence(target, view, reached.len());
                     let candidates = repair_candidates(view, &reached, target.at);
                     let fixes =
-                        self.verified_fixes(project, candidates, code, &location, &evidence);
+                        self.verified_fixes(project, candidates, code, &location, &evidence, depth);
                     findings.push(make(
                         code,
                         true,
@@ -183,6 +193,7 @@ impl Validator for Reachability {
                         CODE_DANGLING_TARGET,
                         &location,
                         &evidence,
+                        depth,
                     );
                     findings.push(make(
                         CODE_DANGLING_TARGET,
@@ -241,7 +252,11 @@ impl Reachability {
         code: &str,
         location: &Location,
         evidence: &Value,
+        depth: u32,
     ) -> Vec<PlanRequest> {
+        if depth != 0 {
+            return Vec::new();
+        }
         let target = identity(code, location, evidence);
         candidates
             .into_iter()
@@ -249,7 +264,7 @@ impl Reachability {
                 staged_apply(project, &self.registry, req)
                     .map(|staged| {
                         !self
-                            .run(&staged)
+                            .run_inner(&staged, depth + 1)
                             .iter()
                             .any(|f| identity(&f.code, &f.location, &f.evidence) == target)
                     })
