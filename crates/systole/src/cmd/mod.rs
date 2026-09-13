@@ -267,6 +267,7 @@ fn error_code(err: &EngineError) -> (&'static str, i32) {
         EngineError::Locked { .. } => ("project.locked", 2),
         EngineError::NotHead { .. } => ("audit.not_head", 1),
         EngineError::NotReversible { .. } => ("audit.not_reversible", 1),
+        EngineError::PendingTransactions { .. } => ("project.pending_transaction", 2),
         EngineError::Chain(_) => ("audit.chain_broken", 2),
         EngineError::Op(OpError::UnknownOp(_)) => ("op.unknown", 2),
         EngineError::Op(OpError::InvalidRequest(_)) => ("op.invalid_request", 2),

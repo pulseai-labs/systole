@@ -73,6 +73,11 @@ pub enum EngineError {
     },
     #[error("audit entry {audit_id} is not reversible ({reason})")]
     NotReversible { audit_id: String, reason: String },
+    #[error(
+        "{count} pending transaction marker(s) under audit/pending — \
+         run `systole project doctor` to resolve them
+    ")]
+    PendingTransactions { count: usize },
 }
 
 pub struct Engine {
@@ -94,6 +99,16 @@ impl Engine {
     /// refusal surfaces here — callers (the CLI) map it to exit 2.
     pub fn open(root: &Path, registry: Registry) -> Result<Engine, EngineError> {
         let project = Project::load(root)?;
+        // A leftover crash marker means a transaction died mid-commit: every
+        // operation refuses until `doctor` resolves it. Checked before the
+        // chain because the marker state explains a torn log better than a
+        // bare chain break.
+        let pending = commit::pending_marker_files(root)?;
+        if !pending.is_empty() {
+            return Err(EngineError::PendingTransactions {
+                count: pending.len(),
+            });
+        }
         // The audit log lives outside the project hash: an edited or
         // truncated audit.jsonl is refused here rather than silently
         // re-extended. `doctor` is the only unverified path
@@ -200,6 +215,16 @@ impl Engine {
         // snapshot, not the open-time one.
         let _lock = self.acquire_lock()?;
         self.project = Project::load(&self.root)?;
+
+        // A marker could have been left between open and this commit — the
+        // locked snapshot is where mutable state is read, so the refusal
+        // lives here too (commit::run re-checks as the funnel).
+        let pending = commit::pending_marker_files(&self.root)?;
+        if !pending.is_empty() {
+            return Err(EngineError::PendingTransactions {
+                count: pending.len(),
+            });
+        }
 
         // Stale-plan refusal: the plan is bound to the exact revision+hash it
         // was materialized against.

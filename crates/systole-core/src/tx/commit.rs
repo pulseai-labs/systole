@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::audit::{self, AuditEntry};
+use crate::audit::{self, AuditEntry, ChainBreak};
 use crate::ir::format::format_value;
 use crate::ir::manifest::{AuditHead, Manifest};
 use crate::ir::project::Project;
@@ -43,6 +43,12 @@ pub enum CommitError {
     },
     #[error("cannot advance project revision {0:?}")]
     BadRevision(String),
+    #[error("{count} pending transaction marker(s) under audit/pending — \
+             run `systole project doctor` to resolve them before any further \
+             transaction")]
+    PendingMarkers { count: usize },
+    #[error("audit chain broken: {0}")]
+    Chain(#[from] ChainBreak),
 }
 
 fn io(path: &str) -> impl FnOnce(std::io::Error) -> CommitError + '_ {
@@ -150,11 +156,15 @@ pub fn plan_commit(
     post_manifest.project_hash = project_hash(&domain);
 
     // 3. The audit entry. post_project_hash is the just-computed hash.
-    let lines = audit::read_lines(&project.root).map_err(|e| io(audit::LOG_FILE)(e))?;
-    let audit_id = audit::next_audit_id(lines.len());
-    let prev_hash = lines
+    // Audit identity comes from the VERIFIED chain, not a raw line count: a
+    // torn or trailing-garbage log cannot mint a colliding audit_id, and an
+    // already-broken chain is refused rather than silently re-extended.
+    let entries =
+        audit::verify_chain(&project.root, project.manifest.audit_head.as_ref())?;
+    let audit_id = audit::next_audit_id(entries.len());
+    let prev_hash = entries
         .last()
-        .map(|line| digest_of(line))
+        .map(audit::entry_hash)
         .unwrap_or_else(|| audit::GENESIS_PREV_HASH.to_string());
     let transaction_id = audit::transaction_id(&audit_id, meta.plan_id.as_deref());
 
@@ -248,6 +258,27 @@ pub fn marker_path(root: &Path, transaction_id: &str) -> PathBuf {
         .join(format!("{transaction_id}.json"))
 }
 
+/// The marker files under `audit/pending/`, in name order — the set every
+/// manifest-writing path must refuse to proceed over until `doctor` resolves
+/// them. A missing directory is an empty set.
+pub fn pending_marker_files(root: &Path) -> Result<Vec<PathBuf>, CommitError> {
+    let dir = root.join(audit::PENDING_DIR);
+    let read_dir = match fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(io(audit::PENDING_DIR)(e)),
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(io(audit::PENDING_DIR))?;
+        if entry.file_name().to_string_lossy().ends_with(".json") {
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Write the marker at the given phase.
 pub fn write_marker(
     root: &Path,
@@ -324,6 +355,14 @@ pub fn run(
     new_stable_id_counter: u64,
     meta: CommitMeta,
 ) -> Result<AuditEntry, CommitError> {
+    // The single funnel every audit-appending write passes through: refuse
+    // while a leftover crash marker exists — doctor owns that state.
+    let pending = pending_marker_files(root)?;
+    if !pending.is_empty() {
+        return Err(CommitError::PendingMarkers {
+            count: pending.len(),
+        });
+    }
     let prepared = plan_commit(root, project, writes, entry_changes, new_stable_id_counter, meta)?;
     let mut marker = prepared.marker.clone();
     write_marker(root, &mut marker, "prepared")?;

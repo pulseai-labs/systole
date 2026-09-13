@@ -5,6 +5,7 @@ use std::path::Path;
 use super::{is_read_only, report_project_error, structured_refusal};
 use systole_core::ir::project::Project;
 use systole_core::lock::{LockError, WriteLock};
+use systole_core::tx::commit;
 
 pub fn run(root: &Path, check: bool, json: bool) -> i32 {
     if !check && is_read_only() {
@@ -33,6 +34,25 @@ pub fn run(root: &Path, check: bool, json: bool) -> i32 {
             }
         }
     };
+    if !check {
+        match commit::pending_marker_files(root) {
+            Ok(markers) if !markers.is_empty() => {
+                return structured_refusal(
+                    root,
+                    "project.pending_transaction",
+                    &format!(
+                        "refused: {} pending marker(s) under audit/pending — \
+                         run `systole project doctor` first",
+                        markers.len()
+                    ),
+                    2,
+                    json,
+                )
+            }
+            Ok(_) => {}
+            Err(e) => return structured_refusal(root, "engine.io", &e.to_string(), 2, json),
+        }
+    }
     let mut project = match Project::load(root) {
         Ok(project) => project,
         Err(err) => return report_project_error(root, &err),

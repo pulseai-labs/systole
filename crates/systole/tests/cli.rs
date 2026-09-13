@@ -125,6 +125,95 @@ fn init_refuses_a_non_empty_directory_with_exit_2() {
 }
 
 #[test]
+fn format_refuses_while_a_pending_marker_exists() {
+    let (_guard, target) = temp_project("w1fmt");
+    let init = systole()
+        .arg("project")
+        .arg("init")
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert_eq!(init.status.code(), Some(0));
+
+    // The marker an interrupted commit leaves behind in audit/pending/.
+    std::fs::write(
+        target.join("audit/pending/tx_probe.json"),
+        "{\"transaction_id\":\"tx_probe\",\"phase\":\"prepared\",\"plan_id\":null,\"files\":[]}",
+    )
+    .unwrap();
+
+    let fmt = systole()
+        .arg("--project")
+        .arg(&target)
+        .arg("project")
+        .arg("format")
+        .output()
+        .unwrap();
+    assert_eq!(
+        fmt.status.code(),
+        Some(2),
+        "format refuses while a marker is pending"
+    );
+    assert!(
+        String::from_utf8_lossy(&fmt.stderr).contains("doctor"),
+        "the refusal names doctor: {}",
+        String::from_utf8_lossy(&fmt.stderr)
+    );
+
+    // --check is a read: it stays allowed.
+    let check = systole()
+        .arg("--project")
+        .arg(&target)
+        .arg("project")
+        .arg("format")
+        .arg("--check")
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(0));
+}
+
+#[test]
+fn pending_marker_refuses_every_operation_until_doctor() {
+    let (_guard, target) = temp_project("w1pend");
+    let init = systole()
+        .arg("project")
+        .arg("init")
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert_eq!(init.status.code(), Some(0));
+
+    std::fs::write(
+        target.join("audit/pending/tx_probe.json"),
+        "{\"transaction_id\":\"tx_probe\",\"phase\":\"prepared\",\"plan_id\":null,\"files\":[]}",
+    )
+    .unwrap();
+
+    for args in [
+        vec!["validate", "--all"],
+        vec!["apply", "rpg.create_region", "--input", "{}"],
+        vec!["rollback", "aud_00001"],
+    ] {
+        let out = systole()
+            .arg("--project")
+            .arg(&target)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} refuses while a marker is pending"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("doctor"),
+            "{args:?} names doctor: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
 fn check_and_open_refuse_a_tampered_audit_log() {
     let (_guard, target) = temp_project("w1aud");
     let init = systole()
