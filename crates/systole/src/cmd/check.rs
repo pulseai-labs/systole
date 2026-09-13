@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::{report_engine_error, report_project_error};
+use super::report_engine_error;
 use systole_core::audit;
 use systole_core::engine::EngineError;
 use systole_core::ir::project::Project;
@@ -37,6 +37,9 @@ pub fn run(root: &Path, json: bool) -> i32 {
             }
             0
         }
-        Err(err) => report_project_error(root, &err),
+        // Route through the engine-error reporter so `--json` failures are
+        // structured — missing, malformed, and integrity-failing projects
+        // all emit a parseable error object, never human-only text.
+        Err(err) => report_engine_error(root, &EngineError::Project(err), json),
     }
 }

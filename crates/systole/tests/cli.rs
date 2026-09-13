@@ -366,3 +366,69 @@ fn force_init_replaces_the_tree_atomically() {
         .collect();
     assert!(leftovers.is_empty(), "staging/trash cleaned up");
 }
+
+/// `project check --json` keeps the structured contract on failure: missing
+/// and malformed projects emit a parseable error object on stdout, not
+/// human-only text on stderr.
+#[test]
+fn check_json_emits_structured_errors_for_missing_and_broken_projects() {
+    let (_guard, target) = temp_project("w1j");
+
+    // Missing project.
+    let missing = systole()
+        .arg("--json")
+        .arg("--project")
+        .arg(&target)
+        .arg("project")
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&missing.stdout).expect("missing-project output parses as JSON");
+    assert!(parsed["error"]["code"].is_string());
+
+    // Malformed manifest.
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("project.systole.json"), b"{ not json").unwrap();
+    let broken = systole()
+        .arg("--json")
+        .arg("--project")
+        .arg(&target)
+        .arg("project")
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(broken.status.code(), Some(2));
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&broken.stdout).expect("malformed-project output parses as JSON");
+    assert!(parsed["error"]["code"].is_string());
+
+    // Integrity failure: a hand-edited IR file under --json.
+    let (_guard2, target2) = temp_project("w1j2");
+    let init = systole()
+        .arg("project")
+        .arg("init")
+        .arg(&target2)
+        .output()
+        .unwrap();
+    assert_eq!(init.status.code(), Some(0));
+    std::fs::create_dir_all(target2.join("entities/note")).unwrap();
+    std::fs::write(
+        target2.join("entities/note/extra.json"),
+        b"{\"kind\": \"note\"}",
+    )
+    .unwrap();
+    let tampered = systole()
+        .arg("--json")
+        .arg("--project")
+        .arg(&target2)
+        .arg("project")
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(tampered.status.code(), Some(2));
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&tampered.stdout).expect("integrity-failure output parses as JSON");
+    assert_eq!(parsed["error"]["code"], "project.integrity");
+}
