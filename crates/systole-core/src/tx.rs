@@ -1,6 +1,8 @@
 //! The transaction: staged writes, inverse data, id allocations. Nothing
 //! touches disk until commit — which is `r0.s1.w2`.
 
+pub mod commit;
+
 use std::collections::BTreeMap;
 
 use crate::ids::{IdAllocator, IdKind, StableId};
@@ -17,6 +19,7 @@ pub struct Transaction {
     staged: Vec<FileChange>,
     inverse: serde_json::Value,
     allocator: IdAllocator,
+    last_allocated: u64,
 }
 
 impl Transaction {
@@ -26,6 +29,7 @@ impl Transaction {
             staged: Vec::new(),
             inverse: serde_json::Value::Object(Default::default()),
             allocator: IdAllocator::new(project.manifest.stable_id_counter),
+            last_allocated: project.manifest.stable_id_counter,
         }
     }
 
@@ -72,7 +76,16 @@ impl Transaction {
     /// Allocate a stable id from the shared counter. The counter is persisted
     /// only by a commit (w2); never reused within a transaction.
     pub fn alloc_id(&mut self, kind: IdKind) -> StableId {
-        self.allocator.next(kind)
+        let id = self.allocator.next(kind);
+        self.last_allocated = id.n;
+        id
+    }
+
+    /// The shared counter value this transaction ends at — the manifest's
+    /// counter plus every allocation it made. A commit persists this value;
+    /// ids.rs stays untouched because the transaction shadows the allocator.
+    pub fn stable_id_counter(&self) -> u64 {
+        self.last_allocated
     }
 
     pub fn staged(&self) -> &[FileChange] {

@@ -34,6 +34,75 @@ enum Command {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// The operation catalog
+    Op {
+        #[command(subcommand)]
+        command: OpCommand,
+    },
+    /// Materialize an op request into a plan file
+    Plan {
+        /// The operation id
+        op_id: String,
+
+        /// JSON literal, @file, or - for stdin
+        #[arg(long, value_name = "JSON")]
+        input: String,
+
+        /// Write the plan here instead of plans/<plan_id>.json
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+    /// Show a plan's diff and findings without writing anything
+    Preview {
+        /// A plan file, or an op id when --input is given
+        target: String,
+
+        /// JSON literal, @file, or - for stdin (required when target is an op id)
+        #[arg(long, value_name = "JSON")]
+        input: Option<String>,
+
+        /// Print canonical before/after values under each change
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Preview, then commit the transaction and audit it
+    Apply {
+        /// A plan file, or an op id when --input is given
+        target: String,
+
+        /// JSON literal, @file, or - for stdin (required when target is an op id)
+        #[arg(long, value_name = "JSON")]
+        input: Option<String>,
+
+        /// Print canonical before/after values under each change
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Roll back the head audit entry with a compensating transaction
+    Rollback {
+        /// The audit id to roll back (must be the head)
+        audit_id: String,
+    },
+    /// Run a read operation and print its output
+    Query {
+        /// The read operation id
+        op_id: String,
+
+        /// JSON literal, @file, or - for stdin
+        #[arg(long, value_name = "JSON")]
+        input: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpCommand {
+    /// Every registered op: id, version, capability, mutability, summary
+    List,
+    /// The full description of one op, including its input schema
+    Describe {
+        /// The operation id
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -55,6 +124,12 @@ enum ProjectCommand {
         #[arg(long)]
         check: bool,
     },
+    /// Resolve interrupted commits, verify the chain and the project hash
+    Doctor {
+        /// Record out-of-band edits as an external_edit audit entry
+        #[arg(long)]
+        absorb: bool,
+    },
 }
 
 fn main() {
@@ -70,7 +145,46 @@ fn main() {
                 let root = cmd::project_root(cli.project.as_deref());
                 cmd::format::run(&root, *check, cli.json)
             }
+            ProjectCommand::Doctor { absorb } => {
+                let root = cmd::project_root(cli.project.as_deref());
+                cmd::doctor::run(&root, *absorb, cli.json)
+            }
         },
+        Command::Op { command } => match command {
+            OpCommand::List => cmd::op::list(cli.json),
+            OpCommand::Describe { id } => {
+                let root = cmd::project_root(cli.project.as_deref());
+                cmd::op::describe(&root, id, cli.json)
+            }
+        },
+        Command::Plan { op_id, input, out } => {
+            let root = cmd::project_root(cli.project.as_deref());
+            cmd::plan::run(&root, op_id, input, out.as_deref(), cli.json)
+        }
+        Command::Preview {
+            target,
+            input,
+            verbose,
+        } => {
+            let root = cmd::project_root(cli.project.as_deref());
+            cmd::preview::run(&root, target, input.as_deref(), *verbose, cli.json)
+        }
+        Command::Apply {
+            target,
+            input,
+            verbose,
+        } => {
+            let root = cmd::project_root(cli.project.as_deref());
+            cmd::apply::run(&root, target, input.as_deref(), *verbose, cli.json)
+        }
+        Command::Rollback { audit_id } => {
+            let root = cmd::project_root(cli.project.as_deref());
+            cmd::rollback::run(&root, audit_id, cli.json)
+        }
+        Command::Query { op_id, input } => {
+            let root = cmd::project_root(cli.project.as_deref());
+            cmd::query::run(&root, op_id, input, cli.json)
+        }
     };
     std::process::exit(code);
 }

@@ -3,6 +3,11 @@ name = "systole-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# The fixture ops (spec §7) prove the engine lifecycle in eval and test runs;
+# the default build compiles no fixture operations.
+fixture-ops = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

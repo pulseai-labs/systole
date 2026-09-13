@@ -147,20 +147,28 @@ impl Project {
     /// [`ProjectError::Integrity`] when the on-disk bytes no longer match the
     /// recorded hash.
     pub fn load(root: &Path) -> Result<Project, ProjectError> {
+        let project = Self::load_unverified(root)?;
+        revision::verify(&project).map_err(ProjectError::Integrity)?;
+        Ok(project)
+    }
+
+    /// Read a project from disk WITHOUT the integrity check — for `doctor`,
+    /// which must see the on-disk state exactly as it is when the recorded
+    /// hash no longer matches. Nothing but doctor's recovery/absorb path
+    /// should use this; every command path goes through `load`.
+    pub fn load_unverified(root: &Path) -> Result<Project, ProjectError> {
         let manifest: Manifest = read_json(root, MANIFEST_FILE)?;
         let lock: Lock = read_json(root, LOCK_FILE)?;
         let mut files = BTreeMap::new();
         for base in IR_DIRS {
             walk_json(&root.join(base), base, &mut files)?;
         }
-        let project = Project {
+        Ok(Project {
             root: root.to_path_buf(),
             manifest,
             lock,
             files,
-        };
-        revision::verify(&project).map_err(ProjectError::Integrity)?;
-        Ok(project)
+        })
     }
 
     /// The canonical bytes of the manifest as written to disk (unblanked).

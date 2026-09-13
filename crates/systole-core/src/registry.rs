@@ -6,13 +6,27 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
+use crate::capability::Capability;
 use crate::finding::Finding;
 use crate::ir::project::Project;
 use crate::op::{
-    Diff, Operation, OperationDescription, OperationPlan, OpError, PlanRequest, ReadOperation,
+    Diff, Mutability, Operation, OperationDescription, OperationPlan, OpError, PlanRequest,
+    ReadOperation,
 };
 use crate::revision::sha256_hex;
 use crate::tx::Transaction;
+
+/// The catalog row `op list` renders: the description plus the capability and
+/// mutability constants declared on the op itself (ADR-0005). Kept separate
+/// from `OperationDescription` so the w1 contract type stays untouched.
+#[derive(Clone, PartialEq, Debug)]
+pub struct OpMeta {
+    pub id: String,
+    pub version: u32,
+    pub capability: Capability,
+    pub mutability: Mutability,
+    pub summary: String,
+}
 
 pub struct Registry {
     ops: BTreeMap<(String, u32), Box<dyn ErasedOperation>>,
@@ -58,6 +72,49 @@ impl Registry {
                     .next_back()
                     .map(|(_, e)| e.describe())
             })
+    }
+
+    /// The version of an op's latest registered entry, whichever side of the
+    /// registry hosts it.
+    pub fn latest_version(&self, id: &str) -> Option<u32> {
+        self.describe(id).map(|d| d.version)
+    }
+
+    /// The capability declared by a specific `(id, version)` entry, whether
+    /// write op or read op. The engine's policy check is this one lookup.
+    pub fn capability_of(&self, id: &str, version: u32) -> Option<Capability> {
+        self.ops
+            .get(&(id.to_string(), version))
+            .map(|e| e.capability())
+            .or_else(|| {
+                self.reads
+                    .get(&(id.to_string(), version))
+                    .map(|e| e.capability())
+            })
+    }
+
+    /// Every registered op and read op as catalog rows (id, version,
+    /// capability, mutability, summary), sorted by id then version.
+    pub fn list_meta(&self) -> Vec<OpMeta> {
+        let mut out: Vec<OpMeta> = self
+            .ops
+            .iter()
+            .map(|((id, version), e)| OpMeta {
+                id: id.clone(),
+                version: *version,
+                capability: e.capability(),
+                mutability: e.mutability(),
+                summary: e.describe().summary,
+            })
+            .collect();
+        out.extend(self.reads.iter().map(|((id, version), e)| OpMeta {
+            id: id.clone(),
+            version: *version,
+            capability: e.capability(),
+            mutability: Mutability::Read,
+            summary: e.describe().summary,
+        }));
+        out
     }
 
     pub fn materialize(
@@ -121,8 +178,17 @@ fn plan_id(req: &PlanRequest, base_revision: &str) -> String {
     format!("plan_{}", &sha256_hex(&domain)[..16])
 }
 
+/// The plan id a given request would receive against a given base revision —
+/// the same deterministic derivation `materialize` uses, exposed so the engine
+/// can verify a stored plan file still matches its request envelope.
+pub fn expected_plan_id(req: &PlanRequest, base_revision: &str) -> String {
+    plan_id(req, base_revision)
+}
+
 trait ErasedOperation: Send + Sync {
     fn describe(&self) -> OperationDescription;
+    fn capability(&self) -> Capability;
+    fn mutability(&self) -> Mutability;
     fn materialize(&self, project: &Project, req: &PlanRequest) -> Result<OperationPlan, OpError>;
     fn diff(&self, project: &Project, plan: &OperationPlan) -> Result<Diff, OpError>;
     fn validate(&self, project: &Project, plan: &OperationPlan) -> Vec<Finding>;
@@ -146,6 +212,14 @@ impl<O: Operation + Default> Default for OpEntry<O> {
 impl<O: Operation + 'static> ErasedOperation for OpEntry<O> {
     fn describe(&self) -> OperationDescription {
         O::describe()
+    }
+
+    fn capability(&self) -> Capability {
+        O::CAPABILITY
+    }
+
+    fn mutability(&self) -> Mutability {
+        O::MUTABILITY
     }
 
     fn materialize(&self, project: &Project, req: &PlanRequest) -> Result<OperationPlan, OpError> {
@@ -195,6 +269,7 @@ impl<O: Operation + 'static> ErasedOperation for OpEntry<O> {
 
 trait ErasedReadOperation: Send + Sync {
     fn describe(&self) -> OperationDescription;
+    fn capability(&self) -> Capability;
     fn query(&self, project: &Project, req: &PlanRequest) -> Result<serde_json::Value, OpError>;
 }
 
@@ -215,6 +290,10 @@ impl<R: ReadOperation + Default> Default for ReadEntry<R> {
 impl<R: ReadOperation + 'static> ErasedReadOperation for ReadEntry<R> {
     fn describe(&self) -> OperationDescription {
         R::describe()
+    }
+
+    fn capability(&self) -> Capability {
+        R::CAPABILITY
     }
 
     fn query(&self, project: &Project, req: &PlanRequest) -> Result<serde_json::Value, OpError> {

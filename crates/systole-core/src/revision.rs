@@ -46,6 +46,13 @@ impl fmt::Display for IntegrityError {
 
 impl std::error::Error for IntegrityError {}
 
+/// Advance `rev_NNNNN` by one. Revisions are engine-written, so a malformed
+/// one is a bug, not user input.
+pub fn bump_revision(revision: &str) -> Result<String, std::num::ParseIntError> {
+    let n: u64 = revision.trim_start_matches("rev_").parse()?;
+    Ok(format!("rev_{:05}", n + 1))
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(digest.len() * 2);
