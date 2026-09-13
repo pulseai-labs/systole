@@ -293,3 +293,76 @@ fn reference_project_passes_check_from_checkout() {
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("project ok"));
 }
+
+#[test]
+fn force_init_replaces_the_tree_atomically() {
+    let (_guard, target) = temp_project("w1force");
+    let init = systole()
+        .arg("project")
+        .arg("init")
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert_eq!(init.status.code(), Some(0));
+    let applied = systole()
+        .arg("--project")
+        .arg(&target)
+        .arg("apply")
+        .arg("rpg.create_region")
+        .arg("--input")
+        .arg(r#"{"id":"town","width":16,"height":16,"spawn":[1,1]}"#)
+        .output()
+        .unwrap();
+    assert_eq!(applied.status.code(), Some(0));
+    assert!(target.join("regions/region_00001").exists());
+    assert!(std::fs::read_to_string(target.join("audit/audit.jsonl"))
+        .unwrap()
+        .contains("aud_00001"));
+
+    let forced = systole()
+        .arg("project")
+        .arg("init")
+        .arg(&target)
+        .arg("--force")
+        .output()
+        .unwrap();
+    assert_eq!(forced.status.code(), Some(0), "--force proceeds");
+
+    // The fresh layout is whole: no stale region, empty audit, rev_00000,
+    // and `project check` passes — the old tree was swapped out, not
+    // truncated in place.
+    assert!(
+        !target.join("regions/region_00001").exists(),
+        "stale IR files are gone"
+    );
+    assert!(
+        std::fs::read_to_string(target.join("audit/audit.jsonl"))
+            .unwrap()
+            .is_empty(),
+        "audit log replaced, not left stale"
+    );
+    let check = systole()
+        .arg("--project")
+        .arg(&target)
+        .arg("project")
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(0));
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(target.join("project.systole.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["project_revision"], "rev_00000");
+    // No scratch dirs leaked beside the project.
+    let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".systole-init")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "staging/trash cleaned up");
+}

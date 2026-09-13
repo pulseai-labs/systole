@@ -13,7 +13,7 @@ use super::lock::Lock;
 use super::manifest::{
     Engine, Manifest, ModuleEntry, FIRST_REVISION, PROJECT_SCHEMA,
 };
-use super::writer::write_atomic;
+use super::writer::{sync_dir, write_atomic};
 use super::{RelPath, LOCK_FILE, MANIFEST_FILE};
 
 const AUDIT_LOG: &str = "audit/audit.jsonl";
@@ -69,6 +69,7 @@ impl Project {
     /// `force`), writing the full Release-0 layout at `rev_00000`.
     pub fn init(root: &Path, force: bool, modules: &[ModuleManifest]) -> Result<Project, ProjectError> {
         let dir = root.display().to_string();
+        let mut replace = false;
         match fs::symlink_metadata(root) {
             Ok(meta) if meta.is_file() => {
                 return Err(ProjectError::NotADirectory { path: dir });
@@ -78,18 +79,25 @@ impl Project {
                     Ok(entries) => entries,
                     Err(source) => return Err(io(&dir, source)),
                 };
-                if !force && entries.next().is_some() {
-                    return Err(ProjectError::NonEmpty { dir });
+                if entries.next().is_some() {
+                    if !force {
+                        return Err(ProjectError::NonEmpty { dir });
+                    }
+                    replace = true;
                 }
             }
             Err(_) => { /* does not exist yet; create it below */ }
+        }
+
+        if replace {
+            return Self::init_replacing(root, modules);
         }
 
         fs::create_dir_all(root).map_err(|e| io(&dir, e))?;
         fs::create_dir_all(root.join("audit/pending")).map_err(|e| io(&dir, e))?;
         for dir_rel in MARKER_DIRS {
             fs::create_dir_all(root.join(dir_rel))
-                .map_err(|e| io(&dir_rel, e))?;
+                .map_err(|e| io(dir_rel, e))?;
         }
         for dir_rel in MARKER_DIRS {
             let marker = root.join(dir_rel).join(MARKER_FILE);
@@ -140,6 +148,69 @@ impl Project {
         project.refresh_integrity();
         project.write_all()?;
         // Load back through the same path every command uses.
+        Project::load(root)
+    }
+
+    /// `init --force` on a non-empty directory: the fresh layout is built in
+    /// a sibling staging directory first, then every managed path is swapped
+    /// in by rename — never written over the old tree in place. The previous
+    /// tree moves aside wholesale and is deleted only after the replacement
+    /// completes, so an existing audit log is never truncated mid-init and
+    /// stale IR files cannot survive into the fresh project.
+    fn init_replacing(root: &Path, modules: &[ModuleManifest]) -> Result<Project, ProjectError> {
+        let dir = root.display().to_string();
+        let parent = root.parent().unwrap_or_else(|| Path::new("."));
+        let pid = std::process::id();
+        let staging = parent.join(format!(".systole-init-staging-{pid}"));
+        let trash = parent.join(format!(".systole-init-trash-{pid}"));
+        // Leftovers from a crashed earlier run.
+        for scratch in [&staging, &trash] {
+            if scratch.exists() {
+                fs::remove_dir_all(scratch).map_err(|e| io(&dir, e))?;
+            }
+        }
+        // A complete, verified fresh project beside the target — same
+        // filesystem, so every rename below is atomic.
+        Self::init(&staging, false, modules)?;
+        fs::create_dir_all(&trash).map_err(|e| io(&dir, e))?;
+
+        // Every path init manages, at the project root's top level.
+        const MANAGED: [&str; 6] = [
+            "audit",
+            "plans",
+            "regions",
+            "entities",
+            MANIFEST_FILE,
+            LOCK_FILE,
+        ];
+        let mut moved: Vec<&str> = Vec::new();
+        for rel in MANAGED {
+            let current = root.join(rel);
+            let incoming = staging.join(rel);
+            let step = (|| -> std::io::Result<()> {
+                if fs::symlink_metadata(&current).is_ok() {
+                    fs::rename(&current, trash.join(rel))?;
+                }
+                fs::rename(&incoming, &current)
+            })();
+            match step {
+                Ok(()) => {
+                    if trash.join(rel).exists() {
+                        moved.push(rel);
+                    }
+                }
+                Err(source) => {
+                    // Best effort: put back whatever was moved aside.
+                    for prev in &moved {
+                        let _ = fs::rename(trash.join(prev), root.join(prev));
+                    }
+                    return Err(io(rel, source));
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&trash);
+        let _ = fs::remove_dir_all(&staging);
+        let _ = sync_dir(root);
         Project::load(root)
     }
 
