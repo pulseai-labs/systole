@@ -541,6 +541,49 @@ impl Operation for DisagreeOp {
     }
 }
 
+/// An op whose apply legitimately stages nothing — the idempotent case:
+/// the commit must refuse rather than append an empty audit entry.
+#[derive(Default)]
+struct NoChangeOp;
+
+impl Operation for NoChangeOp {
+    type Request = EmptyReq;
+    type Plan = EmptyPlan;
+    type Output = EmptyOut;
+
+    const ID: &'static str = "test.nochange";
+    const VERSION: u32 = 1;
+    const CAPABILITY: Capability = Capability::ProjectWrite;
+    const STABILITY: Stability = Stability::Internal;
+    const MUTABILITY: Mutability = Mutability::Write;
+
+    fn describe() -> OperationDescription {
+        OperationDescription {
+            id: Self::ID.into(),
+            version: Self::VERSION,
+            summary: "no-change probe".into(),
+            input_schema: schemars::schema_for!(EmptyReq),
+            example: json!({}),
+            avoid_when: vec!["always".into()],
+        }
+    }
+    fn validate_request(&self, _req: &Self::Request) -> Result<(), OpError> {
+        Ok(())
+    }
+    fn materialize(&self, _p: &Project, _r: Self::Request) -> Result<Self::Plan, OpError> {
+        Ok(EmptyPlan {})
+    }
+    fn diff(&self, _p: &Project, _pl: &Self::Plan) -> Result<Diff, OpError> {
+        Ok(Diff { changes: vec![] })
+    }
+    fn validate(&self, _p: &Project, _pl: &Self::Plan) -> Vec<Finding> {
+        Vec::new()
+    }
+    fn apply(&self, _tx: &mut Transaction, _pl: Self::Plan) -> Result<Self::Output, OpError> {
+        Ok(EmptyOut {})
+    }
+}
+
 fn test_registry() -> Registry {
     let mut r = Registry::new();
     r.register::<NoteOp>();
@@ -548,6 +591,7 @@ fn test_registry() -> Registry {
     r.register::<DelOp>();
     r.register::<EscapeOp>();
     r.register::<DisagreeOp>();
+    r.register::<NoChangeOp>();
     r
 }
 
@@ -1506,4 +1550,40 @@ fn a_module_whose_apply_disagrees_with_its_diff_is_refused_at_commit() {
         "rev_00000"
     );
     Project::load(&root).expect("project untouched by the refused commit");
+}
+
+#[test]
+fn an_idempotent_commit_stages_nothing_and_appends_no_audit_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("proj");
+    Project::init(&root, false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(&root);
+    let lines_before = audit::read_lines(&root).unwrap().len();
+
+    let req = PlanRequest {
+        op_id: "test.nochange".into(),
+        op_version: 1,
+        input: json!({}),
+        actor: "cli_local".into(),
+    };
+    let plan = engine.materialize(&req).expect("materialize");
+    let preview = engine.preview(&plan).expect("preview");
+    assert!(preview.diff.changes.is_empty());
+    assert!(!preview.blocking);
+
+    let result = engine.commit(&req, plan);
+    assert!(matches!(result, Err(EngineError::NoChanges)));
+
+    // No writes, no revision bump, no audit line, no marker.
+    assert_eq!(audit::read_lines(&root).unwrap().len(), lines_before);
+    assert_eq!(
+        engine.project().manifest.project_revision,
+        "rev_00000"
+    );
+    assert!(
+        two_phase::pending_marker_files(&root)
+            .unwrap()
+            .is_empty()
+    );
+    Project::load(&root).expect("unchanged project verifies");
 }

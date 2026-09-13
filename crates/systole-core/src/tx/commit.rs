@@ -50,6 +50,8 @@ pub enum CommitError {
     PendingMarkers { count: usize },
     #[error("staged path escapes the project root: {path:?}")]
     PathEscapes { path: String },
+    #[error("no changes staged — nothing to commit")]
+    NoChanges,
     #[error("audit chain broken: {0}")]
     Chain(#[from] ChainBreak),
 }
@@ -122,6 +124,13 @@ pub fn plan_commit(
     meta: CommitMeta,
 ) -> Result<PreparedCommit, CommitError> {
     let _ = root;
+
+    // An empty write set would still bump the revision and append an audit
+    // entry — refuse before any marker exists so no-change commits leave no
+    // trace.
+    if writes.is_empty() {
+        return Err(CommitError::NoChanges);
+    }
 
     // Every staged or recorded path must stay inside the project — a `..`
     // or absolute target would let `root.join` below escape the root, so

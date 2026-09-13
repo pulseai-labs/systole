@@ -385,7 +385,7 @@ fn golden_journey() {
     let benign = apply_ok(
         &a,
         "rpg.paint_area",
-        r#"{"region":"town","x":10,"y":10,"w":2,"h":2,"terrain":"grass"}"#,
+        r#"{"region":"town","x":10,"y":10,"w":2,"h":2,"terrain":"path"}"#,
     );
     assert!(
         stdout(&benign).contains("aud_00009"),

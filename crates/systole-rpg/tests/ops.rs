@@ -433,3 +433,37 @@ fn a_region_with_absurd_dimensions_is_refused_without_allocating() {
         "expected a blocking invalid-dimensions finding, got {findings:?}"
     );
 }
+
+/// Re-applying a collision rect that is already solid produces an empty
+/// diff and stages nothing — the preview shows no modifications for the
+/// idempotent request.
+#[test]
+fn an_idempotent_request_produces_no_diff_entries() {
+    let mut project = common::project();
+    common::run(
+        &mut project,
+        "rpg.create_region",
+        json!({"id": "town", "width": 8, "height": 8}),
+    )
+    .expect("create_region applies");
+    let input = json!({"region": "town", "x": 1, "y": 1, "w": 2, "h": 2, "solid": true});
+    common::run(&mut project, "rpg.set_collision", input.clone()).expect("first apply");
+
+    let registry = common::registry();
+    let req = PlanRequest {
+        op_id: "rpg.set_collision".into(),
+        op_version: 1,
+        input,
+        actor: "test".into(),
+    };
+    let plan = registry.materialize(&project, &req).expect("materialize");
+    let diff = registry.diff(&project, &plan).expect("diff");
+    assert!(
+        diff.changes.is_empty(),
+        "idempotent diff must be empty: {:?}",
+        diff.changes
+    );
+    let out = common::run(&mut project, "rpg.set_collision", req.input)
+        .expect("idempotent apply");
+    assert!(out.staged.is_empty());
+}

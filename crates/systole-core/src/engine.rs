@@ -67,6 +67,8 @@ pub enum EngineError {
     Blocked(Vec<Finding>),
     #[error("refused: staged writes differ from the previewed diff ({0})")]
     StagedDiffMismatch(String),
+    #[error("no changes: the plan stages nothing — nothing to commit")]
+    NoChanges,
     #[error("project is locked by pid {pid}")]
     Locked { pid: u32 },
     #[error("not head: requested {requested}, head is {}", head.as_deref().unwrap_or("<none>"))]
@@ -352,6 +354,11 @@ impl Engine {
             return Err(EngineError::StagedDiffMismatch(format!(
                 "staged-not-declared: [{staged_only}]; declared-not-staged: [{declared_only}]"
             )));
+        }
+        // An idempotent request stages nothing — no write, no revision bump,
+        // no audit entry. Refusing keeps the log free of empty entries.
+        if staged.is_empty() {
+            return Err(EngineError::NoChanges);
         }
 
         let entry = commit::run(
