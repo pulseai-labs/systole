@@ -385,3 +385,15 @@ fn set_collision_reports_malformed_overrides() {
     );
 }
 
+/// The merged catalog is sorted by id then version across op kinds: the
+/// read op `rpg.query_region` lands between the write ops, not at the tail.
+#[test]
+fn catalog_rows_sort_across_op_kinds() {
+    let meta = common::registry().list_meta();
+    let ids: Vec<String> = meta.iter().map(|m| m.id.clone()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(ids, sorted, "catalog order must be deterministic");
+    let at = ids.iter().position(|id| id == "rpg.query_region").unwrap();
+    assert!(at == 5, "query_region sorts between place_npc and set_collision");
+}

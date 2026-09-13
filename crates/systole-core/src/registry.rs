@@ -58,6 +58,7 @@ impl Registry {
         let mut out: Vec<OperationDescription> =
             self.ops.values().map(|e| e.describe()).collect();
         out.extend(self.reads.values().map(|e| e.describe()));
+        out.sort_unstable_by(|a, b| a.id.cmp(&b.id).then(a.version.cmp(&b.version)));
         out
     }
 
@@ -115,6 +116,7 @@ impl Registry {
             mutability: Mutability::Read,
             summary: e.describe().summary,
         }));
+        out.sort_unstable_by(|a, b| a.id.cmp(&b.id).then(a.version.cmp(&b.version)));
         out
     }
 
