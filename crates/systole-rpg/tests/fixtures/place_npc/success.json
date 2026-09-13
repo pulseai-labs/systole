@@ -1,0 +1,21 @@
+{
+  "setup": [
+    {
+      "op_id": "rpg.create_region",
+      "input": { "id": "town", "width": 16, "height": 16 }
+    }
+  ],
+  "request": { "region": "town", "id": "elder", "at": [3, 3], "facing": "down" },
+  "expect": {
+    "ok": true,
+    "output": {
+      "stable_id": "ent_00002",
+      "path": "entities/npc/ent_00002.json"
+    },
+    "files": [
+      "entities/npc/ent_00002.json",
+      "regions/region_00001/region.json"
+    ],
+    "findings": []
+  }
+}

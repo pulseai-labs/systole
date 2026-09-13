@@ -1,0 +1,17 @@
+{
+  "setup": [
+    {
+      "op_id": "rpg.create_region",
+      "input": { "id": "town", "width": 16, "height": 16 }
+    },
+    {
+      "op_id": "rpg.mark_warp",
+      "input": { "region": "town", "at": [15, 8], "to": { "region": "route_1" } }
+    }
+  ],
+  "request": { "region": "town", "at": [15, 8], "to": { "region": "route_1" } },
+  "expect": {
+    "ok": false,
+    "error_code": "rpg.warp.duplicate_tile"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "setup": [],
+  "request": { "region": "town" },
+  "expect": {
+    "ok": false,
+    "error_code": "rpg.region.not_found"
+  }
+}
