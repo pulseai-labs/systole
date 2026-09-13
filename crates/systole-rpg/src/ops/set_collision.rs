@@ -96,7 +96,7 @@ impl Operation for SetCollision {
         let mut collision = project.files.get(&path).cloned().ok_or_else(|| {
             OpError::Diff(format!("region {} lacks {path}", plan.region_stable_id))
         })?;
-        schema::apply_collision_override(&mut collision, plan.x, plan.y, plan.w, plan.h, plan.solid);
+        schema::apply_collision_override(&mut collision, plan.x, plan.y, plan.w, plan.h, plan.solid).map_err(OpError::Diff)?;
         Ok(diff_of(project, vec![(path, collision)]))
     }
 
@@ -110,7 +110,7 @@ impl Operation for SetCollision {
             OpError::Apply(format!("region {} lacks {path}", plan.region_stable_id))
         })?;
         let tiles_changed =
-            schema::apply_collision_override(&mut collision, plan.x, plan.y, plan.w, plan.h, plan.solid);
+            schema::apply_collision_override(&mut collision, plan.x, plan.y, plan.w, plan.h, plan.solid).map_err(OpError::Apply)?;
         stage_if_changed(tx, path, collision);
         Ok(SetCollisionOutput { tiles_changed })
     }

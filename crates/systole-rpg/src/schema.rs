@@ -409,13 +409,13 @@ pub fn apply_collision_override(
     w: u32,
     h: u32,
     solid: bool,
-) -> u64 {
+) -> Result<u64, String> {
     let mut rows = rows_as_chars(collision);
     let mut changed = 0u64;
     {
         let overrides = collision["overrides"]
             .as_object_mut()
-            .expect("collision file carries an overrides object");
+            .ok_or_else(|| String::from("collision overrides must be an object"))?;
         for dy in 0..h {
             for dx in 0..w {
                 let (tx, ty) = (x + dx, y + dy);
@@ -434,7 +434,7 @@ pub fn apply_collision_override(
         }
     }
     collision["rows"] = chars_to_rows(&rows);
-    changed
+    Ok(changed)
 }
 
 #[cfg(test)]

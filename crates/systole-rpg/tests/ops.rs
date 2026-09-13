@@ -358,3 +358,30 @@ fn place_npc_metadata_mandatory() {
         json!([{ "stable_id": "ent_00002", "at": [3, 3], "facing": "left" }])
     );
 }
+
+/// A malformed collision body absorbed from disk (overrides not an object)
+/// must surface as a structured diff error, not a panic.
+#[test]
+fn set_collision_reports_malformed_overrides() {
+    let mut project = common::project();
+    common::run(
+        &mut project,
+        "rpg.create_region",
+        json!({"id": "town", "width": 8, "height": 8}),
+    )
+    .unwrap();
+
+    let key = schema::collision_path("region_00001");
+    project.files.get_mut(&key).unwrap()["overrides"] = json!(7);
+
+    let refused = common::run(
+        &mut project,
+        "rpg.set_collision",
+        json!({"region": "town", "x": 2, "y": 2, "w": 1, "h": 1, "solid": true}),
+    );
+    assert!(
+        matches!(refused, Err(OpError::Diff(_))),
+        "expected a structured diff error"
+    );
+}
+

@@ -706,7 +706,7 @@ mod tests {
         let terrain = schema::terrain_file(16, 16, schema::Terrain::Grass);
         let mut collision = schema::collision_file(16, 16, &terrain);
         for &(x, y) in walls {
-            schema::apply_collision_override(&mut collision, x, y, 1, 1, true);
+            schema::apply_collision_override(&mut collision, x, y, 1, 1, true).unwrap();
         }
         let mut region = schema::region_file("town", "region_00001", 16, 16, [1, 1]);
         if let Some(at) = npc_at {
@@ -818,7 +818,7 @@ mod tests {
         // town's warp lands exactly there.
         let terrain = schema::terrain_file(4, 4, schema::Terrain::Grass);
         let mut collision = schema::collision_file(4, 4, &terrain);
-        schema::apply_collision_override(&mut collision, 3, 3, 1, 1, true);
+        schema::apply_collision_override(&mut collision, 3, 3, 1, 1, true).unwrap();
         let mut p = town(&BTreeSet::new(), None, None);
         p.files.insert(
             RelPath::new("regions/region_00002/region.json"),
