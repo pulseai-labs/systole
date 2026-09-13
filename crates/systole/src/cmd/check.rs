@@ -2,12 +2,21 @@
 
 use std::path::Path;
 
-use super::report_project_error;
+use super::{report_engine_error, report_project_error};
+use systole_core::audit;
+use systole_core::engine::EngineError;
 use systole_core::ir::project::Project;
 
 pub fn run(root: &Path, json: bool) -> i32 {
     match Project::load(root) {
         Ok(project) => {
+            // The audit log sits outside the project hash: verify the chain
+            // against the manifest's audit_head before reporting ok.
+            if let Err(break_at) =
+                audit::verify_chain(root, project.manifest.audit_head.as_ref())
+            {
+                return report_engine_error(root, &EngineError::Chain(break_at), json);
+            }
             let manifest = &project.manifest;
             if json {
                 println!(

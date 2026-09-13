@@ -94,6 +94,11 @@ impl Engine {
     /// refusal surfaces here — callers (the CLI) map it to exit 2.
     pub fn open(root: &Path, registry: Registry) -> Result<Engine, EngineError> {
         let project = Project::load(root)?;
+        // The audit log lives outside the project hash: an edited or
+        // truncated audit.jsonl is refused here rather than silently
+        // re-extended. `doctor` is the only unverified path
+        // (Project::load_unverified).
+        audit::verify_chain(root, project.manifest.audit_head.as_ref())?;
         Ok(Engine {
             root: root.to_path_buf(),
             project,

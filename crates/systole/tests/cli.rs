@@ -125,6 +125,70 @@ fn init_refuses_a_non_empty_directory_with_exit_2() {
 }
 
 #[test]
+fn check_and_open_refuse_a_tampered_audit_log() {
+    let (_guard, target) = temp_project("w1aud");
+    let init = systole()
+        .arg("project")
+        .arg("init")
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert_eq!(init.status.code(), Some(0));
+    let applied = systole()
+        .arg("--project")
+        .arg(&target)
+        .arg("apply")
+        .arg("rpg.create_region")
+        .arg("--input")
+        .arg(r#"{"id":"town","width":16,"height":16,"spawn":[1,1]}"#)
+        .output()
+        .unwrap();
+    assert_eq!(applied.status.code(), Some(0));
+
+    // A truncation the project hash cannot see: audit/ is outside it.
+    // The manifest still names aud_00001 but the log no longer reaches it.
+    let log = target.join("audit/audit.jsonl");
+    let mut bytes = std::fs::read(&log).unwrap();
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    let keep = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    bytes.truncate(keep);
+    std::fs::write(&log, &bytes).unwrap();
+
+    let check = systole()
+        .arg("--project")
+        .arg(&target)
+        .arg("project")
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(2), "check refuses a broken chain");
+    assert!(
+        String::from_utf8_lossy(&check.stderr).contains("audit chain broken"),
+        "stderr: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let validated = systole()
+        .arg("--project")
+        .arg(&target)
+        .arg("validate")
+        .arg("--all")
+        .output()
+        .unwrap();
+    assert_eq!(
+        validated.status.code(),
+        Some(2),
+        "every Engine::open path refuses a broken chain"
+    );
+}
+
+#[test]
 fn reference_project_passes_check_from_checkout() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
