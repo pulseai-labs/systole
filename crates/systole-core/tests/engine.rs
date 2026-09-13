@@ -821,3 +821,166 @@ fn commit_refuses_a_plan_whose_request_does_not_match() {
     }
     assert!(audit::read_lines(tmp.path()).unwrap().is_empty());
 }
+
+#[test]
+fn doctor_rejects_a_marker_that_does_not_authenticate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let engine = open_engine(tmp.path());
+    let req = note_req("forged");
+    let plan = engine.materialize(&req).unwrap();
+    let mut tx = Transaction::new(engine.project());
+    let output = engine.registry().apply(&mut tx, plan.clone()).unwrap();
+    drop(engine);
+
+    let prepared = two_phase::plan_commit(
+        tmp.path(),
+        &project,
+        tx.staged(),
+        tx.staged(),
+        tx.stable_id_counter(),
+        two_phase::CommitMeta {
+            actor: "cli_local".into(),
+            op_id: plan.op_id.clone(),
+            op_version: plan.op_version,
+            input: req.input.clone(),
+            plan_id: Some(plan.plan_id.clone()),
+            capability: "project.write".into(),
+            approval: "allow".into(),
+            rollback_of: None,
+            output,
+        },
+    )
+    .unwrap();
+    let mut marker = prepared.marker.clone();
+    // A forged marker: the entry claims a prev_hash the chain does not have.
+    marker.entry.prev_hash =
+        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+    two_phase::write_marker(tmp.path(), &mut marker, "renaming").unwrap();
+
+    let result = doctor::run(tmp.path(), false, &[]);
+    assert!(
+        matches!(result, Err(doctor::DoctorError::MarkerRejected(_))),
+        "forged marker must be rejected, got {}",
+        result.is_ok()
+    );
+    assert!(
+        tmp.path()
+            .join("audit/pending")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_some(),
+        "a rejected marker is left in place for inspection"
+    );
+    assert!(
+        audit::read_lines(tmp.path()).unwrap().is_empty(),
+        "nothing was appended"
+    );
+}
+
+#[test]
+fn doctor_rollback_restores_the_manifest_when_its_rename_landed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let engine = open_engine(tmp.path());
+    let req = note_req("manifest");
+    let plan = engine.materialize(&req).unwrap();
+    let mut tx = Transaction::new(engine.project());
+    let output = engine.registry().apply(&mut tx, plan.clone()).unwrap();
+    drop(engine);
+
+    let prepared = two_phase::plan_commit(
+        tmp.path(),
+        &project,
+        tx.staged(),
+        tx.staged(),
+        tx.stable_id_counter(),
+        two_phase::CommitMeta {
+            actor: "cli_local".into(),
+            op_id: plan.op_id.clone(),
+            op_version: plan.op_version,
+            input: req.input.clone(),
+            plan_id: Some(plan.plan_id.clone()),
+            capability: "project.write".into(),
+            approval: "allow".into(),
+            rollback_of: None,
+            output,
+        },
+    )
+    .unwrap();
+    let mut marker = prepared.marker.clone();
+    two_phase::write_marker(tmp.path(), &mut marker, "prepared").unwrap();
+    two_phase::write_temps(tmp.path(), &prepared).unwrap();
+    two_phase::write_marker(tmp.path(), &mut marker, "renaming").unwrap();
+
+    let manifest_pre = std::fs::read(tmp.path().join("project.systole.json")).unwrap();
+    two_phase::apply_renames(tmp.path(), &prepared).unwrap();
+    // Post-rename damage: the data file is gone, so the transaction cannot
+    // complete — rollback must run, and the post-state manifest it already
+    // landed must be restored to its pre-state bytes.
+    std::fs::remove_file(tmp.path().join("entities/note/ent_00001.json")).unwrap();
+
+    let report = doctor::run(tmp.path(), false, &[]).expect("doctor resolves");
+    assert!(matches!(
+        report.recovered,
+        Some(doctor::Recovery::RolledBack { .. })
+    ));
+    assert_eq!(
+        std::fs::read(tmp.path().join("project.systole.json")).unwrap(),
+        manifest_pre,
+        "rollback restored the pre-state manifest"
+    );
+}
+
+#[test]
+fn doctor_completes_a_post_append_crash_without_double_appending() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let engine = open_engine(tmp.path());
+    let req = note_req("appended");
+    let plan = engine.materialize(&req).unwrap();
+    let mut tx = Transaction::new(engine.project());
+    let output = engine.registry().apply(&mut tx, plan.clone()).unwrap();
+    drop(engine);
+
+    let prepared = two_phase::plan_commit(
+        tmp.path(),
+        &project,
+        tx.staged(),
+        tx.staged(),
+        tx.stable_id_counter(),
+        two_phase::CommitMeta {
+            actor: "cli_local".into(),
+            op_id: plan.op_id.clone(),
+            op_version: plan.op_version,
+            input: req.input.clone(),
+            plan_id: Some(plan.plan_id.clone()),
+            capability: "project.write".into(),
+            approval: "allow".into(),
+            rollback_of: None,
+            output,
+        },
+    )
+    .unwrap();
+    let mut marker = prepared.marker.clone();
+    two_phase::write_marker(tmp.path(), &mut marker, "prepared").unwrap();
+    two_phase::write_temps(tmp.path(), &prepared).unwrap();
+    two_phase::write_marker(tmp.path(), &mut marker, "renaming").unwrap();
+    two_phase::apply_renames(tmp.path(), &prepared).unwrap();
+    // The append landed; the crash hit before the marker cleared.
+    two_phase::append_entry(tmp.path(), &marker.entry).unwrap();
+
+    let report = doctor::run(tmp.path(), false, &[]).expect("doctor resolves");
+    assert!(matches!(
+        report.recovered,
+        Some(doctor::Recovery::Completed { .. })
+    ));
+    assert_eq!(
+        audit::read_lines(tmp.path()).unwrap().len(),
+        1,
+        "the appended entry is not duplicated"
+    );
+    Project::load(tmp.path()).expect("completed state verifies");
+}
+

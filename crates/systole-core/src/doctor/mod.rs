@@ -20,8 +20,10 @@ use crate::capability::Capability;
 use crate::engine::is_read_only;
 use crate::finding::Finding;
 use crate::ir::format::format_value;
+use crate::ir::manifest::Manifest;
 use crate::ir::project::{Project, ProjectError};
 use crate::ir::writer::write_atomic;
+use crate::ir::MANIFEST_FILE;
 use crate::lock::{LockError, WriteLock};
 use crate::module::Validator;
 use crate::revision::{self, digest_of, IntegrityError};
@@ -43,6 +45,8 @@ pub enum DoctorError {
     Locked { pid: u32 },
     #[error("{0}")]
     Integrity(#[from] IntegrityError),
+    #[error("pending marker rejected: {0} — left in place for manual inspection")]
+    MarkerRejected(String),
 }
 
 /// How a pending transaction was resolved.
@@ -113,12 +117,90 @@ fn file_state(root: &Path, file: &commit::PendingFile) -> FileState {
     }
 }
 
+/// Authenticate a marker's claims against the verified log tail and the
+/// on-disk manifest before executing anything it says. A marker is just a
+/// file under audit/pending — anything could have written it — so:
+/// - marker and entry must agree on transaction_id and plan_id;
+/// - the claimed entry must either already BE the log tail (a crash between
+///   append and marker-clear) or be the chain's next id with prev_hash equal
+///   to the tail hash;
+/// - the manifest must carry either the entry's base revision (rename still
+///   pending) or its post revision (rename already landed).
+///
+/// Returns whether the claimed entry is already appended.
+fn authenticate_marker(
+    root: &Path,
+    marker: &PendingMarker,
+    lines: &[Vec<u8>],
+) -> Result<bool, DoctorError> {
+    let rejected = |reason: String| {
+        DoctorError::MarkerRejected(format!("{}: {reason}", marker.transaction_id))
+    };
+    if marker.entry.transaction_id != marker.transaction_id {
+        return Err(rejected(
+            "marker/entry transaction_id mismatch".into(),
+        ));
+    }
+    if marker.plan_id != marker.entry.plan_id {
+        return Err(rejected("marker/entry plan_id mismatch".into()));
+    }
+    let last: Option<AuditEntry> = match lines.last() {
+        Some(line) => Some(serde_json::from_slice(line).map_err(|e| {
+            rejected(format!("log tail is unparseable — cannot authenticate: {e}"))
+        })?),
+        None => None,
+    };
+    if let Some(last) = &last
+        && last.audit_id == marker.entry.audit_id
+    {
+        // Post-append crash: the appended line must be exactly the entry the
+        // marker claims.
+        if audit::canonical_line(last) != audit::canonical_line(&marker.entry) {
+            return Err(rejected(
+                "appended entry differs from the marker's claim".into(),
+            ));
+        }
+        return Ok(true);
+    }
+    if marker.entry.audit_id != audit::next_audit_id(lines.len()) {
+        return Err(rejected(format!(
+            "entry {} is not the chain's next id",
+            marker.entry.audit_id
+        )));
+    }
+    let tail_hash = lines
+        .last()
+        .map(|l| digest_of(l))
+        .unwrap_or_else(|| audit::GENESIS_PREV_HASH.to_string());
+    if marker.entry.prev_hash != tail_hash {
+        return Err(rejected(
+            "entry prev_hash does not match the log tail".into(),
+        ));
+    }
+    let manifest_bytes =
+        fs::read(root.join(MANIFEST_FILE)).map_err(|e| DoctorError::Io(e.to_string()))?;
+    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| DoctorError::Io(format!("unparseable manifest: {e}")))?;
+    if manifest.project_revision != marker.entry.base_project_revision
+        && manifest.project_revision != marker.entry.project_revision
+    {
+        return Err(rejected(
+            "manifest revision matches neither the entry's base nor post revision"
+                .into(),
+        ));
+    }
+    Ok(false)
+}
+
 /// Resolve one pending marker (ADR-0007's rules):
+/// - authenticate the marker against the log tail and manifest first;
 /// - every file in place or staged → complete: rename remaining temps, append
 ///   the entry unless the log already carries its `audit_id`, remove marker;
 /// - anything else → roll back: remove temps, restore `before` images on files
-///   already renamed, remove marker.
+///   already renamed — the manifest included — remove marker.
 fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, DoctorError> {
+    let lines = audit::read_lines(root).map_err(|e| DoctorError::Io(e.to_string()))?;
+    let appended = authenticate_marker(root, marker, &lines)?;
     let states: Vec<FileState> = marker
         .files
         .iter()
@@ -154,9 +236,14 @@ fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, Docto
             transaction_id: marker.transaction_id.clone(),
         })
     } else {
+        if appended {
+            return Err(DoctorError::MarkerRejected(format!(
+                "{}: entry {} is already appended but not every post-state file \
+                 is on disk — refusing to roll back a recorded transaction",
+                marker.transaction_id, marker.entry.audit_id
+            )));
+        }
         // Roll back: drop temps, restore before-images where a rename landed.
-        // The manifest is always the last rename, so an incomplete commit
-        // still carries the pre-state manifest — it needs no restore.
         for file in &marker.files {
             if let Some(temp) = &file.temp_path {
                 let temp_abs = root.join(temp);
@@ -164,25 +251,54 @@ fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, Docto
                     fs::remove_file(&temp_abs).map_err(|e| DoctorError::Io(e.to_string()))?;
                 }
             }
-            if matches!(file_state(root, file), FileState::InPlace) {
-                if let Some(change) = marker
+            if matches!(file_state(root, file), FileState::InPlace)
+                && let Some(change) = marker
                     .entry
                     .changes
                     .iter()
                     .find(|c| c.path.as_str() == file.path)
-                {
-                    let target = root.join(&file.path);
-                    match &change.before {
-                        Some(before) => {
-                            write_atomic(&target, &format_value(before))
-                                .map_err(|e| DoctorError::Io(e.to_string()))?;
-                        }
-                        None => {
-                            let _ = fs::remove_file(&target);
-                        }
+            {
+                let target = root.join(&file.path);
+                match &change.before {
+                    Some(before) => {
+                        write_atomic(&target, &format_value(before))
+                            .map_err(|e| DoctorError::Io(e.to_string()))?;
+                    }
+                    None => {
+                        let _ = fs::remove_file(&target);
                     }
                 }
             }
+        }
+        // The manifest is not in entry.changes — its pre-state image travels
+        // in the marker. Restore it whenever the on-disk manifest is not
+        // already the pre-state bytes (a post-state manifest left in place
+        // would make the project unloadable after rollback).
+        let manifest_target = root.join(MANIFEST_FILE);
+        let manifest_pre_bytes = marker
+            .manifest_before
+            .as_ref()
+            .map(|m| format_value(&serde_json::to_value(m).expect("manifest serializes")));
+        let manifest_in_place = marker
+            .files
+            .iter()
+            .any(|f| f.path == MANIFEST_FILE && matches!(file_state(root, f), FileState::InPlace));
+        match &manifest_pre_bytes {
+            Some(pre) => {
+                let current = fs::read(&manifest_target).ok();
+                if current.as_deref() != Some(pre.as_slice()) {
+                    write_atomic(&manifest_target, pre)
+                        .map_err(|e| DoctorError::Io(e.to_string()))?;
+                }
+            }
+            None if manifest_in_place => {
+                return Err(DoctorError::MarkerRejected(format!(
+                    "{}: the manifest rename landed but the marker records no \
+                     pre-state image to restore",
+                    marker.transaction_id
+                )));
+            }
+            None => {}
         }
         let _ = commit::remove_marker(root, marker);
         Ok(Recovery::RolledBack {
@@ -283,7 +399,7 @@ pub fn run(
     }
 
     // Load WITHOUT the hash check — doctor exists to look at broken state.
-    let project = Project::load_unverified(root)?;
+    let mut project = Project::load_unverified(root)?;
 
     // 1. Pending markers first — recovery may need the lock and is a write.
     let mut recovered = None;
@@ -297,6 +413,10 @@ pub fn run(
             recovered = Some(resolve_marker(root, marker)?);
         }
         drop(_lock);
+        // Recovery may have landed a post-state manifest or restored the
+        // pre-state one — the chain and integrity checks below must see the
+        // state actually on disk now, not the pre-recovery snapshot.
+        project = Project::load_unverified(root)?;
     }
 
     // 2. Audit chain + audit_head.

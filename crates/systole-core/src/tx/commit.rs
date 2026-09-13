@@ -91,6 +91,10 @@ pub struct PendingMarker {
     pub phase: String,
     pub plan_id: Option<String>,
     pub entry: AuditEntry,
+    /// The pre-state manifest: rollback restores it when the manifest rename
+    /// already landed but the transaction cannot be completed.
+    #[serde(default)]
+    pub manifest_before: Option<Manifest>,
     pub files: Vec<PendingFile>,
 }
 
@@ -236,6 +240,7 @@ pub fn plan_commit(
             phase: "prepared".into(),
             plan_id: meta.plan_id,
             entry,
+            manifest_before: Some(project.manifest.clone()),
             files,
         },
         temp_writes,
