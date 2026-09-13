@@ -15,7 +15,7 @@ pub mod validate;
 
 use std::path::Path;
 
-use systole_core::engine::EngineError;
+use systole_core::engine::{Engine, EngineError};
 use systole_core::finding::Finding;
 use systole_core::ir::format::format_value;
 use systole_core::ir::project::ProjectError;
@@ -47,6 +47,16 @@ pub fn module_validators() -> Vec<Box<dyn systole_core::module::Validator>> {
     let mut out = CoreModule.validators();
     out.extend(systole_rpg::RpgModule.validators());
     out
+}
+
+/// The verified engine every command path uses: project load, pending-marker
+/// and audit-chain checks, plus the module validators attached so preview and
+/// commit gate on blocking findings.
+pub fn open_engine(
+    root: &Path,
+) -> Result<systole_core::engine::Engine, systole_core::engine::EngineError> {
+    let (registry, _) = compose();
+    Engine::open(root, registry).map(|e| e.with_validators(module_validators()))
 }
 
 /// The kill switch (risk gate `ir-integrity`): `SYSTOLE_READ_ONLY=1` refuses

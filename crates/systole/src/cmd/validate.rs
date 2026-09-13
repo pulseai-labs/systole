@@ -5,13 +5,11 @@
 
 use std::path::Path;
 
-use super::{compose, module_validators, report_engine_error};
-use systole_core::engine::Engine;
+use super::{module_validators, open_engine, report_engine_error};
 use systole_core::finding::Finding;
 
 pub fn run(root: &Path, json: bool) -> i32 {
-    let (registry, _) = compose();
-    let engine = match Engine::open(root, registry) {
+    let engine = match open_engine(root) {
         Ok(e) => e,
         Err(e) => return report_engine_error(root, &e, json),
     };

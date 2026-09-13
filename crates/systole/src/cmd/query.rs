@@ -3,13 +3,11 @@
 
 use std::path::Path;
 
-use super::{compose, read_input, report_engine_error, CLI_ACTOR};
-use systole_core::engine::Engine;
+use super::{open_engine, read_input, report_engine_error, CLI_ACTOR};
 use systole_core::op::{OpError, PlanRequest};
 
 pub fn run(root: &Path, op_id: &str, input_raw: &str, json: bool) -> i32 {
-    let (registry, _) = compose();
-    let engine = match Engine::open(root, registry) {
+    let engine = match open_engine(root) {
         Ok(e) => e,
         Err(e) => return report_engine_error(root, &e, json),
     };

@@ -7,10 +7,9 @@
 use std::path::Path;
 
 use super::{
-    absolutize, compose, is_read_only, module_validators, read_input, report_engine_error,
+    absolutize, is_read_only, module_validators, open_engine, read_input, report_engine_error,
     structured_refusal, write_plan_file, PlanFile, CLI_ACTOR,
 };
-use systole_core::engine::Engine;
 use systole_core::finding::Finding;
 use systole_core::op::PlanRequest;
 
@@ -64,8 +63,7 @@ fn plan_for_op(
     out: Option<&Path>,
     json: bool,
 ) -> i32 {
-    let (registry, _) = compose();
-    let engine = match Engine::open(root, registry) {
+    let engine = match open_engine(root) {
         Ok(e) => e,
         Err(e) => return report_engine_error(root, &e, json),
     };
@@ -112,8 +110,7 @@ fn plan_from_finding(
     out: Option<&Path>,
     json: bool,
 ) -> i32 {
-    let (registry, _) = compose();
-    let engine = match Engine::open(root, registry) {
+    let engine = match open_engine(root) {
         Ok(e) => e,
         Err(e) => return report_engine_error(root, &e, json),
     };

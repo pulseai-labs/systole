@@ -2,12 +2,10 @@
 
 use std::path::Path;
 
-use super::{compose, report_engine_error};
-use systole_core::engine::Engine;
+use super::{open_engine, report_engine_error};
 
 pub fn run(root: &Path, audit_id: &str, json: bool) -> i32 {
-    let (registry, _) = compose();
-    let mut engine = match Engine::open(root, registry) {
+    let mut engine = match open_engine(root) {
         Ok(e) => e,
         Err(e) => return report_engine_error(root, &e, json),
     };

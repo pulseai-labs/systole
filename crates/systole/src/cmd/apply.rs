@@ -3,12 +3,10 @@
 
 use std::path::Path;
 
-use super::{compose, preview, print_diff, print_findings, report_engine_error};
-use systole_core::engine::Engine;
+use super::{open_engine, preview, print_diff, print_findings, report_engine_error};
 
 pub fn run(root: &Path, target: &str, input: Option<&str>, verbose: bool, json: bool) -> i32 {
-    let (registry, _) = compose();
-    let mut engine = match Engine::open(root, registry) {
+    let mut engine = match open_engine(root) {
         Ok(e) => e,
         Err(e) => return report_engine_error(root, &e, json),
     };

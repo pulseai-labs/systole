@@ -214,11 +214,12 @@ fn step_build_and_validate(root: &Path) -> String {
         "step 4: the override opens the centre"
     );
 
-    // Step 5: the elder on the walkable interior of the closed ring.
+    // Step 5: the elder on open floor — a commit can no longer create a
+    // blocking state, so the seal itself arrives via the hand edit below.
     apply_ok(
         root,
         "rpg.place_npc",
-        r#"{"region":"town","id":"elder","at":[5,5],"intent":"greets the player","constraints":["stays in the room"]}"#,
+        r#"{"region":"town","id":"elder","at":[1,2],"intent":"greets the player","constraints":["stays in the room"]}"#,
     );
     let ent: Value =
         serde_json::from_slice(&std::fs::read(root.join("entities/npc/ent_00002.json")).unwrap())
@@ -274,6 +275,26 @@ fn step_build_and_validate(root: &Path) -> String {
         "step 6: revision rev_00006"
     );
 
+    // Step 6.5: seal the elder by hand — a blocking state can only ever come
+    // from an out-of-band edit now, and doctor --absorb adopts it as an
+    // external_edit while canonicalizing the file back on disk.
+    let region_path = root.join("regions/region_00001/region.json");
+    let mut region_file: Value =
+        serde_json::from_slice(&std::fs::read(&region_path).unwrap()).unwrap();
+    region_file["placements"][0]["at"] = serde_json::json!([5, 5]);
+    std::fs::write(&region_path, serde_json::to_string_pretty(&region_file).unwrap()).unwrap();
+    let seal = on(root, &["project", "doctor", "--absorb"]);
+    assert_eq!(
+        seal.status.code(),
+        Some(1),
+        "step 6.5: absorb seals the elder"
+    );
+    assert_eq!(
+        audit_lines(root).len(),
+        7,
+        "step 6.5: the absorb is aud_00007"
+    );
+
     // Step 7: exactly two findings — the sealed NPC (blocking, with the
     // door-tile fix) and the dangling warp (advisory).
     let validate = on(root, &["validate", "--all"]);
@@ -323,7 +344,7 @@ fn step_repair(root: &Path, finding_id: &str) {
     let apply = on(root, &["apply", plan_path.to_str().unwrap()]);
     assert_eq!(apply.status.code(), Some(0), "step 8: apply exits 0");
     assert!(
-        stdout(&apply).contains("aud_00007"),
+        stdout(&apply).contains("aud_00008"),
         "step 8: the fix is aud_00007"
     );
     let validate = on(root, &["validate", "--all"]);
@@ -367,18 +388,18 @@ fn golden_journey() {
         r#"{"region":"town","x":10,"y":10,"w":2,"h":2,"terrain":"grass"}"#,
     );
     assert!(
-        stdout(&benign).contains("aud_00008"),
-        "step 9: the benign transaction is aud_00008"
+        stdout(&benign).contains("aud_00009"),
+        "step 9: the benign transaction is aud_00009"
     );
-    let rollback = on(&a, &["rollback", "aud_00008"]);
+    let rollback = on(&a, &["rollback", "aud_00009"]);
     assert_eq!(rollback.status.code(), Some(0), "step 9: rollback exits 0");
     assert!(
-        stdout(&rollback).contains("rolled back aud_00008 as aud_00009 at rev_00009"),
+        stdout(&rollback).contains("rolled back aud_00009 as aud_00010 at rev_00010"),
         "step 9: the rollback line"
     );
     let last = audit_lines(&a).pop().unwrap();
     assert!(
-        last.contains("\"rollback_of\":\"aud_00008\""),
+        last.contains("\"rollback_of\":\"aud_00009\""),
         "step 9: the compensating entry names its target"
     );
     assert_eq!(
@@ -417,7 +438,7 @@ fn golden_journey() {
     let err = stderr(&check);
     assert!(err.contains("collision.json"), "step 10: the changed file is named");
     assert!(
-        err.contains("rev_00009"),
+        err.contains("rev_00010"),
         "step 10: the recorded revision is named"
     );
     assert_eq!(
@@ -456,10 +477,10 @@ fn golden_journey() {
     // Step 11: the audit-entry count.
     let n = audit_lines(&a).len();
     println!("audit entries: {n}");
-    assert_eq!(n, 10, "step 11: ten audit entries");
+    assert_eq!(n, 11, "step 11: eleven audit entries");
     assert_eq!(
-        manifest(&a)["audit_head"]["id"], "aud_00010",
-        "step 11: the audit head is aud_00010"
+        manifest(&a)["audit_head"]["id"], "aud_00011",
+        "step 11: the audit head is aud_00011"
     );
 }
 

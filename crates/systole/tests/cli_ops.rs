@@ -365,6 +365,62 @@ fn a_blocking_finding_refuses_apply_with_exit_1_and_no_audit() {
 }
 
 #[test]
+fn a_module_validator_finding_refuses_apply_with_no_audit() {
+    let (_g, root) = init_project("w8-validator-gate");
+    let region = on(
+        &root,
+        &[
+            "apply",
+            "rpg.create_region",
+            "--input",
+            r#"{"id":"town","width":16,"height":16,"spawn":[1,1]}"#,
+        ],
+    );
+    assert_eq!(region.status.code(), Some(0));
+    let npc = on(
+        &root,
+        &[
+            "apply",
+            "rpg.place_npc",
+            "--input",
+            r#"{"region":"town","id":"elder","at":[1,2]}"#,
+        ],
+    );
+    assert_eq!(npc.status.code(), Some(0));
+
+    // Sealing the elder tile makes the post-state unreachable — a module
+    // validator finding, not the op's own checks.
+    let before = audit_line_count(&root);
+    let out = on(
+        &root,
+        &[
+            "--json",
+            "apply",
+            "rpg.set_collision",
+            "--input",
+            r#"{"region":"town","x":1,"y":2,"w":1,"h":1,"solid":true}"#,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(envelope["error"]["code"], "plan.blocked");
+    assert_eq!(
+        audit_line_count(&root),
+        before,
+        "a blocked commit appends nothing"
+    );
+    let collision: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("regions/region_00001/layers/collision.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        collision["overrides"],
+        serde_json::json!({}),
+        "a blocked commit writes nothing"
+    );
+}
+
+#[test]
 fn doctor_reports_a_healthy_project() {
     let (_g, root) = init_project("w2-doc");
     on(&root, &["apply", "fixture.put_note", "--input", r#"{"text":"hello"}"#]);

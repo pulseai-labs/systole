@@ -15,6 +15,7 @@ use crate::finding::Finding;
 use crate::ir::project::{Project, ProjectError};
 use crate::ir::RelPath;
 use crate::lock::{LockError, WriteLock};
+use crate::module::Validator;
 use crate::op::{Diff, FileChange, OpError, OperationPlan, PlanRequest};
 use crate::registry::{expected_plan_id, Registry};
 use crate::tx::commit::{self, CommitMeta};
@@ -84,6 +85,9 @@ pub struct Engine {
     root: PathBuf,
     project: Project,
     registry: Registry,
+    /// Module validators run on the post-transaction state in preview and
+    /// commit — an empty set leaves the gate inert (tests, doctor).
+    validators: Vec<Box<dyn Validator>>,
 }
 
 /// The result of `preview`: the diff plus every finding. Read-only — nothing
@@ -118,7 +122,15 @@ impl Engine {
             root: root.to_path_buf(),
             project,
             registry,
+            validators: Vec::new(),
         })
+    }
+
+    /// Attach the module validators the preview/commit gate runs against
+    /// each plan's post-transaction state.
+    pub fn with_validators(mut self, validators: Vec<Box<dyn Validator>>) -> Self {
+        self.validators = validators;
+        self
     }
 
     pub fn project(&self) -> &Project {
@@ -171,9 +183,35 @@ impl Engine {
     }
 
     /// plan → diff → validate. Never stages, writes, or audits.
+    ///
+    /// Module validators run against the POST-transaction state — the project
+    /// as it would stand if this plan committed — so a blocking finding on
+    /// the would-be state is what `commit` refuses over.
     pub fn preview(&self, plan: &OperationPlan) -> Result<Preview, EngineError> {
         let diff = self.registry.diff(&self.project, plan)?;
-        let findings = self.registry.validate(&self.project, plan);
+        let mut findings = self.registry.validate(&self.project, plan);
+        if !self.validators.is_empty() {
+            let mut post_files = self.project.files.clone();
+            for change in &diff.changes {
+                match &change.after {
+                    Some(value) => {
+                        post_files.insert(change.path.clone(), value.clone());
+                    }
+                    None => {
+                        post_files.remove(&change.path);
+                    }
+                }
+            }
+            let post = Project {
+                root: self.project.root.clone(),
+                manifest: self.project.manifest.clone(),
+                lock: self.project.lock.clone(),
+                files: post_files,
+            };
+            for v in &self.validators {
+                findings.extend(v.run(&post));
+            }
+        }
         let blocking = findings.iter().any(|f| f.blocking);
         Ok(Preview {
             diff,

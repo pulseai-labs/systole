@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use super::{
-    absolutize, compose, print_diff, print_findings, read_input, read_plan_file,
+    absolutize, open_engine, print_diff, print_findings, read_input, read_plan_file,
     report_engine_error, CLI_ACTOR,
 };
 use systole_core::engine::Engine;
@@ -77,8 +77,7 @@ pub fn report(root: &Path, err: EngineErr, json: bool) -> i32 {
 }
 
 pub fn run(root: &Path, target: &str, input: Option<&str>, verbose: bool, json: bool) -> i32 {
-    let (registry, _) = compose();
-    let engine = match Engine::open(root, registry) {
+    let engine = match open_engine(root) {
         Ok(e) => e,
         Err(e) => return report_engine_error(root, &e, json),
     };

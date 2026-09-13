@@ -70,8 +70,20 @@ fn walled_project(tag: &str) -> (TempDir, PathBuf) {
     apply(
         &root,
         "rpg.place_npc",
-        r#"{"region":"town","id":"elder","at":[5,5]}"#,
+        r#"{"region":"town","id":"elder","at":[2,2]}"#,
     );
+    // Seal elder by hand: under the commit-time validator gate a blocking
+    // state can only arrive out-of-band; doctor --absorb adopts the edit.
+    let region_path = root
+        .join("regions")
+        .join("region_00001")
+        .join("region.json");
+    let mut region_file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&region_path).unwrap()).unwrap();
+    region_file["placements"][0]["at"] = serde_json::json!([5, 5]);
+    std::fs::write(&region_path, serde_json::to_string_pretty(&region_file).unwrap()).unwrap();
+    let seal = on(&root, &["project", "doctor", "--absorb"]);
+    assert_eq!(seal.status.code(), Some(1), "seal absorb failed: {seal:?}");
     (guard, root)
 }
 
