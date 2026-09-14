@@ -1,0 +1,17 @@
+{
+  "setup": [
+    {
+      "op_id": "rpg.create_region",
+      "input": { "id": "town", "width": 16, "height": 16 }
+    }
+  ],
+  "request": { "region": "town", "at": [15, 8], "to": { "region": "route_1", "at": [1, 8] } },
+  "expect": {
+    "ok": true,
+    "output": { "stable_id": "warp_00002" },
+    "files": [
+      "regions/region_00001/region.json"
+    ],
+    "findings": ["rpg.warp.dangling_target"]
+  }
+}

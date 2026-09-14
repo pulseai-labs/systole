@@ -1,0 +1,13 @@
+{
+  "setup": [
+    {
+      "op_id": "rpg.create_region",
+      "input": { "id": "town", "width": 16, "height": 16 }
+    }
+  ],
+  "request": { "region": "town", "x": 14, "y": 15, "w": 4, "h": 2, "terrain": "path" },
+  "expect": {
+    "ok": false,
+    "error_code": "spatial.rect_out_of_bounds"
+  }
+}

@@ -1,0 +1,50 @@
+//! The Project IR on disk: manifest, lock, the loaded project, the canonical
+//! format, and the atomic writer.
+
+pub mod format;
+pub mod lock;
+pub mod manifest;
+pub mod project;
+pub mod writer;
+
+use std::fmt;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// A project-relative POSIX path (`regions/region_00001/region.json`). Ordering
+/// is byte order of the path string, which is the hash's sorted-path order.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RelPath(String);
+
+impl RelPath {
+    pub fn new(path: impl Into<String>) -> Self {
+        RelPath(path.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RelPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Whether `path` is a usable project-relative target: non-empty and built
+/// entirely of normal components — no root, no prefix, no `..` — so
+/// `root.join(path)` can never escape the project root. Every staged or
+/// replayed write path must pass this check before it is joined.
+pub fn is_project_relative(path: &str) -> bool {
+    !path.is_empty()
+        && std::path::Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// The file name of the project manifest inside a project root.
+pub const MANIFEST_FILE: &str = "project.systole.json";
+/// The file name of the lock inside a project root.
+pub const LOCK_FILE: &str = "systole.lock.json";

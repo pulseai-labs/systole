@@ -1,0 +1,63 @@
+{
+  "setup": [
+    {
+      "op_id": "rpg.create_region",
+      "input": { "id": "town", "width": 8, "height": 8, "fill": "grass", "spawn": [1, 1] }
+    },
+    {
+      "op_id": "rpg.paint_path",
+      "input": { "region": "town", "from": [1, 1], "to": [3, 3] }
+    },
+    {
+      "op_id": "rpg.place_npc",
+      "input": { "region": "town", "id": "elder", "at": [3, 3], "facing": "down" }
+    },
+    {
+      "op_id": "rpg.mark_warp",
+      "input": { "region": "town", "at": [7, 7], "to": { "region": "route_1" } }
+    }
+  ],
+  "request": { "region": "town" },
+  "expect": {
+    "ok": true,
+    "output": {
+      "id": "town",
+      "stable_id": "region_00001",
+      "width": 8,
+      "height": 8,
+      "spawn": [1, 1],
+      "rows": [
+        "........",
+        ".---....",
+        "...-....",
+        "...-....",
+        "........",
+        "........",
+        "........",
+        "........"
+      ],
+      "collision_rows": [
+        "........",
+        "........",
+        "........",
+        "........",
+        "........",
+        "........",
+        "........",
+        "........"
+      ],
+      "placements": [
+        { "stable_id": "ent_00002", "id": "elder", "at": [3, 3], "facing": "down" }
+      ],
+      "warps": [
+        {
+          "stable_id": "warp_00003",
+          "at": [7, 7],
+          "to": { "region_id": "route_1", "region_stable_id": null, "at": null }
+        }
+      ]
+    },
+    "files": [],
+    "findings": []
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "constraints": [],
+  "facing": "down",
+  "human_name": null,
+  "id": "elder",
+  "intent": "",
+  "kind": "npc",
+  "owner_module": "systole.rpg",
+  "stable_id": "ent_00002",
+  "tags": []
+}

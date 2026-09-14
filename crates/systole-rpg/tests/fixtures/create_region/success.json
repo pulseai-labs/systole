@@ -1,0 +1,17 @@
+{
+  "setup": [],
+  "request": { "id": "town", "width": 16, "height": 16, "fill": "grass", "spawn": [1, 1] },
+  "expect": {
+    "ok": true,
+    "output": {
+      "stable_id": "region_00001",
+      "path": "regions/region_00001/region.json"
+    },
+    "files": [
+      "regions/region_00001/region.json",
+      "regions/region_00001/layers/terrain.json",
+      "regions/region_00001/layers/collision.json"
+    ],
+    "findings": []
+  }
+}

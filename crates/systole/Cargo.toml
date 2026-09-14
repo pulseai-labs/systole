@@ -1,0 +1,22 @@
+[package]
+name = "systole"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "systole"
+path = "src/main.rs"
+
+[features]
+# Compile the fixture ops (spec §7) into the binary for eval and test runs;
+# the default build ships no fixture operations.
+fixture-ops = ["systole-core/fixture-ops"]
+
+[dependencies]
+clap = { workspace = true }
+serde_json = { workspace = true }
+systole-core = { path = "../systole-core" }
+systole-rpg = { path = "../systole-rpg" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

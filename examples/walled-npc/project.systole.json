@@ -1,0 +1,27 @@
+{
+  "audit_head": {
+    "hash": "sha256:1789e6b5398b3b76c73448f7411c0457f64a9c0daa3fb99d97997a751c52f02d",
+    "id": "aud_00005"
+  },
+  "engine": {
+    "name": "systole",
+    "version": "0.1.0"
+  },
+  "files": {
+    "entities/npc/ent_00002.json": "sha256:5f647373bd357461fd60f04cd711ee0301681b7dffc46d818788ff9ef308099d",
+    "regions/region_00001/layers/collision.json": "sha256:544e9a18d55a111751f7ba44fa12eec29b93065f6a292dd1ec0549cfef61202b",
+    "regions/region_00001/layers/terrain.json": "sha256:e92a8f3f8017bf5c3ad79c74d20ce28bcb593dee9f1282352d471ada6e1f9b3d",
+    "regions/region_00001/region.json": "sha256:aa092020ca4b542ab258043843565b35a70be228f4474cfca1f42c30fbf80fa5",
+    "systole.lock.json": "sha256:5a6f3ddd23827ae5029578141af10ca842a07ba126e65f780024dbc817ca27af"
+  },
+  "modules": {
+    "systole.rpg": {
+      "schema": 1,
+      "version": "0.1.0"
+    }
+  },
+  "project_hash": "sha256:8bab6fb6934b98b1ca4e3ed7d8ec36713773e7d63ef449e686a81a89c330dc17",
+  "project_revision": "rev_00005",
+  "project_schema": 1,
+  "stable_id_counter": 3
+}
