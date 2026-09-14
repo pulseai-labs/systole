@@ -1171,6 +1171,89 @@ fn doctor_rejects_a_marker_recording_an_out_of_root_target() {
     );
 }
 
+/// A marker repeating the tail entry verbatim but adding a staged row for
+/// an unrelated file must be rejected: the write set is bound to what the
+/// authenticated entry records, not to whatever the marker claims.
+#[test]
+fn doctor_rejects_a_marker_that_adds_a_row_to_the_tail_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    Project::init(root, false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(root);
+    let req = note_req("committed");
+    let plan = engine.materialize(&req).unwrap();
+    engine.commit(&req, plan).unwrap();
+    drop(engine);
+
+    // Forge a marker that repeats the tail entry exactly — a crash between
+    // append and marker-clear shape — but whose files list adds a staged
+    // README.md row no transaction ever wrote.
+    let lines = audit::read_lines(root).unwrap();
+    let tail: AuditEntry =
+        serde_json::from_slice(lines.last().unwrap()).unwrap();
+    let txid = tail.transaction_id.clone();
+    let staged = b"forged content".to_vec();
+    std::fs::write(
+        root.join(format!(".README.md.systmp-{txid}")),
+        &staged,
+    )
+    .unwrap();
+    let real_note_row = two_phase::PendingFile {
+        path: "entities/note/ent_00001.json".into(),
+        temp_path: Some(format!(
+            "entities/note/.ent_00001.json.systmp-{txid}"
+        )),
+        expected_post_hash: Some(digest_of(
+            &systole_core::ir::format::format_value(
+                tail.changes[0].after.as_ref().unwrap(),
+            ),
+        )),
+    };
+    let real_manifest_row = two_phase::PendingFile {
+        path: "project.systole.json".into(),
+        temp_path: Some(format!(
+            ".project.systole.json.systmp-{txid}"
+        )),
+        expected_post_hash: Some(digest_of(
+            &std::fs::read(root.join("project.systole.json")).unwrap(),
+        )),
+    };
+    let forged_row = two_phase::PendingFile {
+        path: "README.md".into(),
+        temp_path: Some(format!(".README.md.systmp-{txid}")),
+        expected_post_hash: Some(digest_of(&staged)),
+    };
+    let mut marker = two_phase::PendingMarker {
+        transaction_id: txid,
+        phase: "renaming".into(),
+        plan_id: tail.plan_id.clone(),
+        entry: tail,
+        manifest_before: None,
+        files: vec![real_note_row, forged_row, real_manifest_row],
+    };
+    two_phase::write_marker(root, &mut marker, "renaming").unwrap();
+
+    let result = doctor::run(root, false, &[]);
+    assert!(matches!(
+        result,
+        Err(doctor::DoctorError::MarkerRejected(_))
+    ));
+    assert!(
+        !root.join("README.md").exists(),
+        "nothing was renamed into place"
+    );
+    assert_eq!(
+        audit::read_lines(root).unwrap().len(),
+        1,
+        "nothing was appended"
+    );
+    assert_eq!(
+        two_phase::pending_marker_files(root).unwrap().len(),
+        1,
+        "the rejected marker is left in place for inspection"
+    );
+}
+
 #[test]
 fn doctor_rollback_restores_the_manifest_when_its_rename_landed() {
     let tmp = tempfile::tempdir().unwrap();

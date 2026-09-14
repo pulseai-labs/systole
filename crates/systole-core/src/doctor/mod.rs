@@ -20,7 +20,7 @@ use crate::capability::Capability;
 use crate::engine::is_read_only;
 use crate::finding::Finding;
 use crate::ir::format::format_value;
-use crate::ir::manifest::Manifest;
+use crate::ir::manifest::{AuditHead, Manifest};
 use crate::ir::project::{Project, ProjectError};
 use crate::ir::writer::{sync_dir, write_atomic};
 use crate::ids::StableId;
@@ -241,6 +241,118 @@ fn authenticate_marker(
     Ok(false)
 }
 
+/// Bind `marker.files` to the authenticated entry before any rename: every
+/// row — path, temp path, and expected post-state digest — must be exactly
+/// what the entry's recorded `changes` plus the mandatory manifest row
+/// derive to. A forged marker repeating a real entry cannot add a staged row
+/// for an unrelated file: the write set is derived from the entry, never
+/// trusted from the marker. `appended` is authenticate_marker's verdict —
+/// when the entry is already the log tail, the manifest post-state it
+/// describes must exist on disk.
+fn bind_marker_files(
+    root: &Path,
+    marker: &PendingMarker,
+    appended: bool,
+) -> Result<(), DoctorError> {
+    let rejected = |reason: String| {
+        DoctorError::MarkerRejected(format!("{}: {reason}", marker.transaction_id))
+    };
+    // `core.external_edit` records digests, not content: its `after` is the
+    // digest the staged bytes must hash to — every other entry's `after`
+    // IS the canonical content. A null `after` in either shape is a delete.
+    let digest_recorded = marker.entry.op_id == "core.external_edit";
+    let mut expected: Vec<commit::PendingFile> = Vec::new();
+    for change in &marker.entry.changes {
+        let row = match &change.after {
+            Some(after) if !(digest_recorded && after.is_null()) => {
+                commit::PendingFile {
+                    path: change.path.as_str().to_string(),
+                    temp_path: Some(commit::temp_path_for(
+                        change.path.as_str(),
+                        &marker.transaction_id,
+                    )),
+                    expected_post_hash: Some(if digest_recorded {
+                        after
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| digest_of(&format_value(after)))
+                    } else {
+                        digest_of(&format_value(after))
+                    }),
+                }
+            }
+            _ => commit::PendingFile {
+                path: change.path.as_str().to_string(),
+                temp_path: None,
+                expected_post_hash: None,
+            },
+        };
+        expected.push(row);
+    }
+    // The manifest row is structural — every commit appends it last. Its
+    // digest cannot be recomputed from the entry (the stable-id counter is
+    // not recorded), so it is bound by locating the bytes it claims below.
+    expected.push(commit::PendingFile {
+        path: MANIFEST_FILE.to_string(),
+        temp_path: Some(commit::temp_path_for(
+            MANIFEST_FILE,
+            &marker.transaction_id,
+        )),
+        expected_post_hash: marker
+            .files
+            .last()
+            .filter(|f| f.path == MANIFEST_FILE)
+            .and_then(|f| f.expected_post_hash.clone()),
+    });
+    if marker.files != expected {
+        return Err(rejected(
+            "files do not match the write set the entry records".into(),
+        ));
+    }
+
+    // Authenticate the manifest post-state the last row points at: located
+    // bytes (target or temp) must hash to the claimed digest and carry
+    // exactly the state the entry records — its post revision, this audit
+    // head, and its post project hash.
+    let row = marker.files.last().expect("the manifest row was checked");
+    let claimed = row.expected_post_hash.as_deref().unwrap_or_default();
+    let mut candidates = vec![root.join(MANIFEST_FILE)];
+    if let Some(temp) = &row.temp_path {
+        candidates.push(root.join(temp));
+    }
+    let located = candidates
+        .iter()
+        .filter_map(|p| fs::read(p).ok())
+        .find(|bytes| digest_of(bytes) == claimed);
+    match located {
+        Some(bytes) => {
+            let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
+                rejected(format!("manifest post-state is unparseable: {e}"))
+            })?;
+            let head = AuditHead {
+                id: marker.entry.audit_id.clone(),
+                hash: audit::entry_hash(&marker.entry),
+            };
+            if manifest.project_revision != marker.entry.project_revision
+                || manifest.audit_head.as_ref() != Some(&head)
+                || manifest.project_hash != marker.entry.post_project_hash
+            {
+                return Err(rejected(
+                    "manifest post-state does not match the entry".into(),
+                ));
+            }
+        }
+        None if appended => {
+            return Err(rejected(
+                "the manifest post-state the entry records is not on disk"
+                    .into(),
+            ));
+        }
+        None => {}
+    }
+    Ok(())
+}
+
 /// Resolve one pending marker (ADR-0007's rules):
 /// - authenticate the marker against the log tail and manifest first;
 /// - every file in place or staged → complete: rename remaining temps, append
@@ -268,6 +380,7 @@ fn resolve_marker(root: &Path, marker: &PendingMarker) -> Result<Recovery, Docto
     repair_torn_tail(root, marker)?;
     let lines = audit::read_lines(root).map_err(|e| DoctorError::Io(e.to_string()))?;
     let appended = authenticate_marker(root, marker, &lines)?;
+    bind_marker_files(root, marker, appended)?;
     let states: Vec<FileState> = marker
         .files
         .iter()

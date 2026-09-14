@@ -311,7 +311,7 @@ pub fn plan_commit(
 /// The sibling temp path for a target: a dotfile, never `*.json`, so it is
 /// invisible to the loader and the hash domain even while it sits beside its
 /// target inside `entities/**` or `regions/**`.
-fn temp_path_for(target: &str, transaction_id: &str) -> String {
+pub(crate) fn temp_path_for(target: &str, transaction_id: &str) -> String {
     match target.rsplit_once('/') {
         Some((dir, name)) => format!("{dir}/.{name}.systmp-{transaction_id}"),
         None => format!(".{target}.systmp-{transaction_id}"),
