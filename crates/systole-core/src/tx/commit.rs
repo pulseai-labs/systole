@@ -50,6 +50,8 @@ pub enum CommitError {
     PendingMarkers { count: usize },
     #[error("staged path escapes the project root: {path:?}")]
     PathEscapes { path: String },
+    #[error("operation write is outside the managed IR domain (regions/**, entities/**): {path:?}")]
+    OutsideIrDomain { path: String },
     #[error("no changes staged — nothing to commit")]
     NoChanges,
     #[error("audit chain broken: {0}")]
@@ -61,6 +63,26 @@ fn io(path: &str) -> impl FnOnce(std::io::Error) -> CommitError + '_ {
         path: path.to_string(),
         source,
     }
+}
+
+/// The write domain a transaction may touch: an operation's staged writes
+/// are confined to the managed IR trees (`regions/**` and `entities/**`
+/// documents); engine-internal transactions — rollback's inverse diff,
+/// doctor's absorb — may also rewrite the engine-owned manifest and lock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WriteDomain {
+    Operation,
+    Internal,
+}
+
+/// Whether `path` is inside the managed IR domain an operation may write:
+/// a `*.json` document under `regions/**` or `entities/**`. The manifest,
+/// the lock, the audit tree and `.systole/**` are engine-owned — never
+/// operation-writable.
+pub(crate) fn is_ir_domain_path(path: &str) -> bool {
+    crate::ir::is_project_relative(path)
+        && path.ends_with(".json")
+        && (path.starts_with("regions/") || path.starts_with("entities/"))
 }
 
 /// Everything the audit entry needs beyond the staged changes — supplied by
@@ -122,6 +144,7 @@ pub fn plan_commit(
     entry_changes: &[FileChange],
     new_stable_id_counter: u64,
     meta: CommitMeta,
+    domain: WriteDomain,
 ) -> Result<PreparedCommit, CommitError> {
     let _ = root;
 
@@ -138,6 +161,17 @@ pub fn plan_commit(
     for change in writes.iter().chain(entry_changes) {
         if !crate::ir::is_project_relative(change.path.as_str()) {
             return Err(CommitError::PathEscapes {
+                path: change.path.as_str().to_string(),
+            });
+        }
+        // Under the operation domain a write is further confined to the
+        // managed IR trees: the manifest, the lock, and the audit tree are
+        // engine-owned — an op staging `audit/audit.jsonl` would replace
+        // the verified history mid-commit and still report success.
+        if domain == WriteDomain::Operation
+            && !is_ir_domain_path(change.path.as_str())
+        {
+            return Err(CommitError::OutsideIrDomain {
                 path: change.path.as_str().to_string(),
             });
         }
@@ -425,6 +459,7 @@ pub fn run(
     entry_changes: &[FileChange],
     new_stable_id_counter: u64,
     meta: CommitMeta,
+    domain: WriteDomain,
 ) -> Result<AuditEntry, CommitError> {
     // The single funnel every audit-appending write passes through: refuse
     // while a leftover crash marker exists — doctor owns that state.
@@ -434,7 +469,7 @@ pub fn run(
             count: pending.len(),
         });
     }
-    let prepared = plan_commit(root, project, writes, entry_changes, new_stable_id_counter, meta)?;
+    let prepared = plan_commit(root, project, writes, entry_changes, new_stable_id_counter, meta, domain)?;
     let mut marker = prepared.marker.clone();
     write_marker(root, &mut marker, "prepared")?;
     write_temps(root, &prepared)?;

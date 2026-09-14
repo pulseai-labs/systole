@@ -488,6 +488,60 @@ impl Operation for EscapeOp {
     }
 }
 
+/// A write op whose diff and apply both stage the audit log — inside the
+/// project but outside the managed IR domain. The commit funnel must
+/// refuse before any rename replaces the verified history.
+#[derive(Default)]
+struct AuditLogOp;
+
+impl Operation for AuditLogOp {
+    type Request = EmptyReq;
+    type Plan = EmptyPlan;
+    type Output = EmptyOut;
+
+    const ID: &'static str = "test.auditlog";
+    const VERSION: u32 = 1;
+    const CAPABILITY: Capability = Capability::ProjectWrite;
+    const STABILITY: Stability = Stability::Internal;
+    const MUTABILITY: Mutability = Mutability::Write;
+
+    fn describe() -> OperationDescription {
+        OperationDescription {
+            id: Self::ID.into(),
+            version: Self::VERSION,
+            summary: "audit-log write-domain probe".into(),
+            input_schema: schemars::schema_for!(EmptyReq),
+            example: json!({}),
+            avoid_when: vec!["always".into()],
+        }
+    }
+    fn validate_request(&self, _req: &Self::Request) -> Result<(), OpError> {
+        Ok(())
+    }
+    fn materialize(&self, _p: &Project, _r: Self::Request) -> Result<Self::Plan, OpError> {
+        Ok(EmptyPlan {})
+    }
+    fn diff(&self, _p: &Project, _pl: &Self::Plan) -> Result<Diff, OpError> {
+        Ok(Diff {
+            changes: vec![FileChange {
+                path: RelPath::new("audit/audit.jsonl"),
+                before: None,
+                after: Some(json!({ "forged": true })),
+            }],
+        })
+    }
+    fn validate(&self, _p: &Project, _pl: &Self::Plan) -> Vec<Finding> {
+        Vec::new()
+    }
+    fn apply(&self, tx: &mut Transaction, _pl: Self::Plan) -> Result<Self::Output, OpError> {
+        tx.write(
+            RelPath::new("audit/audit.jsonl"),
+            json!({ "forged": true }),
+        );
+        Ok(EmptyOut {})
+    }
+}
+
 /// A module whose apply() stages a write its diff() never declared — the
 /// commit gate must refuse before the transaction touches disk.
 #[derive(Default)]
@@ -590,6 +644,7 @@ fn test_registry() -> Registry {
     r.register::<NetOp>();
     r.register::<DelOp>();
     r.register::<EscapeOp>();
+    r.register::<AuditLogOp>();
     r.register::<DisagreeOp>();
     r.register::<NoChangeOp>();
     r
@@ -764,6 +819,7 @@ fn crash_after_marker_before_any_rename_rolls_back_under_doctor() {
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();
@@ -817,6 +873,7 @@ fn crash_after_all_renames_before_append_completes_under_doctor() {
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();
@@ -1036,6 +1093,7 @@ fn doctor_rejects_a_marker_that_does_not_authenticate() {
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();
@@ -1093,6 +1151,7 @@ fn doctor_rejects_a_marker_recording_an_out_of_root_target() {
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();
@@ -1140,6 +1199,7 @@ fn doctor_rollback_restores_the_manifest_when_its_rename_landed() {
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();
@@ -1194,6 +1254,7 @@ fn doctor_completes_a_post_append_crash_without_double_appending() {
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();
@@ -1245,6 +1306,7 @@ fn doctor_repairs_a_torn_final_audit_line_and_completes() {
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();
@@ -1307,6 +1369,7 @@ fn doctor_refuses_a_torn_line_that_is_not_the_markers_entry() {
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();
@@ -1597,6 +1660,50 @@ fn an_op_staging_an_escaping_path_is_refused_before_anything_writes() {
 }
 
 #[test]
+fn an_op_staging_the_audit_log_is_refused_before_any_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("proj");
+    Project::init(&root, false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(&root);
+
+    // A real commit first, so the log holds a verified line to protect.
+    apply_note(&mut engine, "keep me");
+    let log_before = std::fs::read(root.join("audit/audit.jsonl")).unwrap();
+
+    let req = PlanRequest {
+        op_id: "test.auditlog".into(),
+        op_version: 1,
+        input: json!({}),
+        actor: "cli_local".into(),
+    };
+    let plan = engine.materialize(&req).expect("materialize");
+    let result = engine.commit(&req, plan);
+    assert!(matches!(
+        result,
+        Err(EngineError::Commit(
+            two_phase::CommitError::OutsideIrDomain { .. }
+        ))
+    ));
+
+    // The audit log is byte-identical, no marker or temp survived, and the
+    // project still verifies at rev_00001.
+    assert_eq!(
+        std::fs::read(root.join("audit/audit.jsonl")).unwrap(),
+        log_before
+    );
+    assert!(
+        two_phase::pending_marker_files(&root)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        engine.project().manifest.project_revision,
+        "rev_00001"
+    );
+    Project::load(&root).expect("project untouched by the refused commit");
+}
+
+#[test]
 fn a_module_whose_apply_disagrees_with_its_diff_is_refused_at_commit() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("proj");
@@ -1707,6 +1814,7 @@ fn staged_completed_marker(
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();
@@ -1782,6 +1890,7 @@ fn doctor_fails_loudly_when_marker_removal_fails_after_rollback() {
             rollback_of: None,
             output,
         },
+        two_phase::WriteDomain::Operation,
     )
     .unwrap();
     let mut marker = prepared.marker.clone();

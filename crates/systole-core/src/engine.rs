@@ -413,6 +413,7 @@ impl Engine {
                 rollback_of: None,
                 output,
             },
+            commit::WriteDomain::Operation,
         )?;
 
         self.project = Project::load(&self.root)?;
@@ -509,6 +510,7 @@ impl Engine {
                 rollback_of: Some(audit_id.to_string()),
                 output: serde_json::Value::Null,
             },
+            commit::WriteDomain::Internal,
         )?;
 
         self.project = Project::load(&self.root)?;

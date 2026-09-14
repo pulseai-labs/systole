@@ -479,12 +479,9 @@ fn observed_stable_id_counter(project: &Project) -> u64 {
 /// would leave the root) is hand-edited manifest damage, not an external
 /// edit, and must never reach the staged writes.
 fn is_managed_file(path: &str) -> bool {
-    if path == MANIFEST_FILE || path == LOCK_FILE {
-        return true;
-    }
-    crate::ir::is_project_relative(path)
-        && path.ends_with(".json")
-        && (path.starts_with("regions/") || path.starts_with("entities/"))
+    path == MANIFEST_FILE
+        || path == LOCK_FILE
+        || commit::is_ir_domain_path(path)
 }
 
 fn absorb_external_edit(
@@ -582,6 +579,7 @@ fn absorb_external_edit(
             rollback_of: None,
             output: serde_json::Value::Null,
         },
+        commit::WriteDomain::Internal,
     )?;
     Ok(entry)
 }
