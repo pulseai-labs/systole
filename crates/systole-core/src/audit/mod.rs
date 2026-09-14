@@ -16,7 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::format::{format_line, format_value};
-use crate::ir::manifest::AuditHead;
+use crate::ir::manifest::{AuditHead, FIRST_REVISION};
 use crate::op::FileChange;
 use crate::revision::{digest_of, sha256_hex};
 
@@ -140,11 +140,14 @@ impl std::error::Error for ChainBreak {}
 /// Verify the chain end to end and the manifest's `audit_head` against the
 /// last line. Each line must be canonical compact form, carry `aud_{i+1:05}`,
 /// and name the previous line's hash in `prev_hash` (genesis for the first).
-/// Returns the parsed entries on success; the first failing line's index on a
-/// break.
+/// The manifest's `project_revision` — blanked out of the project hash — is
+/// bound here instead: `rev_00000` for an empty log, otherwise exactly the
+/// tail entry's recorded post-state revision. Returns the parsed entries on
+/// success; the first failing line's index on a break.
 pub fn verify_chain(
     root: &Path,
     audit_head: Option<&AuditHead>,
+    project_revision: &str,
 ) -> Result<Vec<AuditEntry>, ChainBreak> {
     let lines = read_lines(root).map_err(|e| ChainBreak {
         index: 0,
@@ -208,7 +211,7 @@ pub fn verify_chain(
     }
 
     // The manifest's audit_head must name exactly the last line.
-    match (audit_head, entries.last()) {
+    let entries = match (audit_head, entries.last()) {
         (None, None) => Ok(entries),
         (Some(head), Some(last)) => {
             let last_hash = digest_of(&lines[lines.len() - 1]);
@@ -235,7 +238,27 @@ pub fn verify_chain(
             audit_id: Some(last.audit_id.clone()),
             reason: "entries exist but audit_head is null".into(),
         }),
+    }?;
+
+    // Revision continuity: `project_revision` is blanked out of the project
+    // hash, so it is bound to the chain here — `rev_00000` when the log is
+    // empty, else exactly the tail entry's recorded post-state revision.
+    // An out-of-band manifest rewrite would otherwise carry a forged base
+    // into the next commit while the chain still verifies.
+    let expected = match entries.last() {
+        Some(tail) => tail.project_revision.as_str(),
+        None => FIRST_REVISION,
+    };
+    if project_revision != expected {
+        return Err(ChainBreak {
+            index: entries.len().saturating_sub(1),
+            audit_id: entries.last().map(|e| e.audit_id.clone()),
+            reason: format!(
+                "manifest revision {project_revision} does not match the chain's {expected}"
+            ),
+        });
     }
+    Ok(entries)
 }
 
 /// The current time as RFC 3339 UTC — the only timestamp anywhere in the

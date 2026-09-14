@@ -224,7 +224,11 @@ pub fn plan_commit(
     // torn or trailing-garbage log cannot mint a colliding audit_id, and an
     // already-broken chain is refused rather than silently re-extended.
     let entries =
-        audit::verify_chain(&project.root, project.manifest.audit_head.as_ref())?;
+        audit::verify_chain(
+            &project.root,
+            project.manifest.audit_head.as_ref(),
+            &project.manifest.project_revision,
+        )?;
     let audit_id = audit::next_audit_id(entries.len());
     let prev_hash = entries
         .last()

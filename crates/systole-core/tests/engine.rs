@@ -149,7 +149,7 @@ fn audit_chain_verifies_and_a_tampered_middle_entry_breaks_it() {
         id: "aud_00003".into(),
         hash: digest_of(&l3),
     };
-    let entries = audit::verify_chain(root, Some(&head)).expect("clean chain verifies");
+    let entries = audit::verify_chain(root, Some(&head), "rev_00003").expect("clean chain verifies");
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].prev_hash, audit::GENESIS_PREV_HASH);
 
@@ -159,7 +159,7 @@ fn audit_chain_verifies_and_a_tampered_middle_entry_breaks_it() {
     tampered.output = json!({ "stable_id": "ent_99999" });
     let l2t = audit::canonical_line(&tampered);
     write_log(root, &[l1.clone(), l2t, l3.clone()]);
-    let brk = audit::verify_chain(root, Some(&head)).expect_err("tampered chain must break");
+    let brk = audit::verify_chain(root, Some(&head), "rev_00003").expect_err("tampered chain must break");
     assert_eq!(brk.index, 2, "the first entry that fails verification is the successor");
     assert_eq!(brk.audit_id.as_deref(), Some("aud_00003"));
     assert!(brk.reason.contains("prev_hash"), "{}", brk.reason);
@@ -169,8 +169,67 @@ fn audit_chain_verifies_and_a_tampered_middle_entry_breaks_it() {
     tampered_id.audit_id = "aud_00007".into();
     let l2i = audit::canonical_line(&tampered_id);
     write_log(root, &[l1.clone(), l2i, l3.clone()]);
-    let brk2 = audit::verify_chain(root, Some(&head)).expect_err("id tamper must break");
+    let brk2 = audit::verify_chain(root, Some(&head), "rev_00003").expect_err("id tamper must break");
     assert_eq!(brk2.index, 1);
+}
+
+/// `project_revision` is blanked out of the project hash, so rewriting only
+/// that field still self-verifies — the chain is where the forgery shows:
+/// the manifest's revision must equal the audit tail's recorded post-state
+/// revision (`rev_00000` on an empty log). Verified open refuses.
+#[test]
+fn a_rewritten_manifest_revision_is_refused_at_verified_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    Project::init(root, false, &rpg_modules()).unwrap();
+
+    // Empty log: only rev_00000 is consistent — a rewrite is refused even
+    // though the field is blanked out of the hash and still self-verifies.
+    let mut tampered = Project::load_unverified(root).unwrap();
+    tampered.manifest.project_revision = "rev_00099".into();
+    std::fs::write(
+        root.join("project.systole.json"),
+        tampered.manifest_bytes(),
+    )
+    .unwrap();
+    assert!(matches!(
+        Engine::open(root, test_registry()),
+        Err(EngineError::Chain(_))
+    ));
+
+    // Restore, commit one entry, rewrite again: the manifest must equal
+    // the tail entry's recorded post-state revision.
+    let mut clean = Project::load_unverified(root).unwrap();
+    clean.manifest.project_revision = "rev_00000".into();
+    std::fs::write(
+        root.join("project.systole.json"),
+        clean.manifest_bytes(),
+    )
+    .unwrap();
+    let mut engine = open_engine(root);
+    let req = note_req("committed");
+    let plan = engine.materialize(&req).unwrap();
+    engine.commit(&req, plan).unwrap();
+    drop(engine);
+
+    let mut tampered = Project::load_unverified(root).unwrap();
+    tampered.manifest.project_revision = "rev_00099".into();
+    std::fs::write(
+        root.join("project.systole.json"),
+        tampered.manifest_bytes(),
+    )
+    .unwrap();
+    match Engine::open(root, test_registry()) {
+        Err(EngineError::Chain(brk)) => assert!(
+            brk.reason.contains("revision"),
+            "expected a revision/chain mismatch, got {}",
+            brk.reason
+        ),
+        Ok(_) => panic!("engine opened on a revision-mismatched manifest"),
+        Err(e) => panic!("expected a chain break, got {e}"),
+    }
+    // The unverified path still loads — doctor must see broken state.
+    Project::load_unverified(root).expect("unverified load stays loose");
 }
 
 #[test]
@@ -187,19 +246,19 @@ fn audit_head_must_name_the_last_line() {
         id: "aud_00001".into(),
         hash: digest_of(b"not-the-line"),
     };
-    assert!(audit::verify_chain(root, Some(&wrong)).is_err());
+    assert!(audit::verify_chain(root, Some(&wrong), "rev_00001").is_err());
     // Entries present but manifest head null breaks.
-    assert!(audit::verify_chain(root, None).is_err());
+    assert!(audit::verify_chain(root, None, "rev_00001").is_err());
     // Head set but log empty breaks.
     std::fs::write(root.join("audit/audit.jsonl"), b"").unwrap();
     let some = AuditHead {
         id: "aud_00001".into(),
         hash: digest_of(&l1),
     };
-    assert!(audit::verify_chain(root, Some(&some)).is_err());
+    assert!(audit::verify_chain(root, Some(&some), "rev_00000").is_err());
     // Empty log + null head verifies (a fresh project).
     assert_eq!(
-        audit::verify_chain(root, None).unwrap().len(),
+        audit::verify_chain(root, None, "rev_00000").unwrap().len(),
         0
     );
 }

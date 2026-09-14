@@ -123,7 +123,11 @@ impl Engine {
         // truncated audit.jsonl is refused here rather than silently
         // re-extended. `doctor` is the only unverified path
         // (Project::load_unverified).
-        audit::verify_chain(root, project.manifest.audit_head.as_ref())?;
+        audit::verify_chain(
+            root,
+            project.manifest.audit_head.as_ref(),
+            &project.manifest.project_revision,
+        )?;
         Ok(Engine {
             root: root.to_path_buf(),
             project,

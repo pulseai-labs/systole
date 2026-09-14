@@ -730,7 +730,11 @@ pub fn run(
     }
 
     // 2. Audit chain + audit_head.
-    let entries = audit::verify_chain(root, project.manifest.audit_head.as_ref())?;
+    let entries = audit::verify_chain(
+        root,
+        project.manifest.audit_head.as_ref(),
+        &project.manifest.project_revision,
+    )?;
 
     // 3. Load-time hash. On mismatch: refuse, or absorb under the lock.
     let mut absorbed = None;

@@ -13,7 +13,11 @@ pub fn run(root: &Path, json: bool) -> i32 {
             // The audit log sits outside the project hash: verify the chain
             // against the manifest's audit_head before reporting ok.
             if let Err(break_at) =
-                audit::verify_chain(root, project.manifest.audit_head.as_ref())
+                audit::verify_chain(
+                    root,
+                    project.manifest.audit_head.as_ref(),
+                    &project.manifest.project_revision,
+                )
             {
                 return report_engine_error(root, &EngineError::Chain(break_at), json);
             }
