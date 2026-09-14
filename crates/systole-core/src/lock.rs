@@ -4,8 +4,8 @@
 //! not needing it), with the holder's pid written into the file. `.systole/**`
 //! is outside the hash domain, so the lock file is invisible to the IR.
 //!
-//! Taken for `commit`, `rollback` and doctor's recovery/`--absorb`; never for
-//! reads. The guard releases the OS lock on drop.
+//! Taken for `commit`, `rollback`, `format`, doctor's recovery/`--absorb`,
+//! and the `init --force` root swap; never for reads. The guard releases the OS lock on drop.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};

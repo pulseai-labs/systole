@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::lock::{LockError, WriteLock};
 use crate::module::ModuleManifest;
 use crate::revision::{self, blanked_manifest_value, digest_of, project_hash};
 
@@ -48,6 +49,8 @@ pub enum ProjectError {
          at {trash} — move it aside or restore it before retrying"
     )]
     InterruptedReplace { trash: String },
+    #[error("project is locked by pid {pid}")]
+    Locked { pid: u32 },
     #[error(transparent)]
     Integrity(#[from] revision::IntegrityError),
 }
@@ -166,8 +169,19 @@ impl Project {
     /// displaced tree whole under `trash` for the next init to resolve (see
     /// `resolve_interrupted_replace`) — never a half-mixed tree with no
     /// recovery record, and never deleted before recovery is possible.
+    ///
+    /// The swap runs under the project's write lock — the same
+    /// single-writer lock commit, rollback, format and doctor take: a
+    /// concurrent writer already holding it keeps resolving marker, temp,
+    /// manifest and audit paths through `root`, so moving the root out from
+    /// under it would land old-project writes in the freshly installed
+    /// tree. The guard is held across both renames and the trash removal —
+    /// the lock file rides the displaced tree into `trash` and is unlinked
+    /// with it while the guard keeps the inode locked until the new root
+    /// is in place.
     fn init_replacing(root: &Path, modules: &[ModuleManifest]) -> Result<Project, ProjectError> {
         let dir = root.display().to_string();
+        let _lock = acquire_write_lock(root)?;
         let (staging, trash) = Self::scratch_paths(root);
         // A leftover staging dir only ever holds generated content.
         if staging.exists() {
@@ -335,6 +349,16 @@ impl Project {
         }
         Ok(out)
     }
+}
+
+/// Take the project's write lock — the same single-writer lock commit,
+/// rollback, format and doctor hold — mapping lock errors into the project
+/// error set.
+fn acquire_write_lock(root: &Path) -> Result<WriteLock, ProjectError> {
+    WriteLock::acquire(root).map_err(|e| match e {
+        LockError::Held { pid } => ProjectError::Locked { pid },
+        LockError::Io(source) => io(&root.display().to_string(), source),
+    })
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(root: &Path, rel: &str) -> Result<T, ProjectError> {

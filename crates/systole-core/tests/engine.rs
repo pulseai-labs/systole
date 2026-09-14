@@ -1479,6 +1479,36 @@ fn an_interrupted_force_init_restores_the_displaced_tree_and_never_destroys_it()
 }
 
 #[test]
+fn forced_init_refuses_while_the_write_lock_is_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("proj");
+    Project::init(&root, false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(&root);
+    apply_note(&mut engine, "original");
+    drop(engine);
+
+    // A concurrent writer holds the single-writer lock and keeps resolving
+    // its marker, temp, manifest and audit paths through `root` — forced
+    // init must refuse rather than swap the root out from under it.
+    let held = WriteLock::acquire(&root).expect("the lock is free before init");
+    match Project::init(&root, true, &rpg_modules()) {
+        Err(ProjectError::Locked { pid }) => assert_eq!(pid, std::process::id()),
+        other => panic!("expected Locked, got {other:?}"),
+    }
+    // Nothing was swapped: the old tree is intact and still verifies.
+    assert!(root.join("entities/note/ent_00001.json").exists());
+    Project::load(&root).expect("the locked project is untouched");
+    drop(held);
+
+    // Uncontended forced init succeeds, and the lock it took is released
+    // with the swap — the lock file rode the displaced tree into the trash.
+    let fresh = Project::init(&root, true, &rpg_modules()).expect("forced init succeeds");
+    assert_eq!(fresh.manifest.project_revision, "rev_00000");
+    assert!(!root.join("entities/note").exists());
+    WriteLock::acquire(&root).expect("the write lock is free after forced init");
+}
+
+#[test]
 fn an_op_staging_an_escaping_path_is_refused_before_anything_writes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("proj");
