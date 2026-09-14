@@ -48,6 +48,12 @@ pub enum DoctorError {
     Integrity(#[from] IntegrityError),
     #[error("pending marker rejected: {0} — left in place for manual inspection")]
     MarkerRejected(String),
+    #[error(
+        "refused to absorb: {path} is outside the managed file domain (the \
+         manifest, the lock, and *.json files under regions/ and entities/) — \
+         repair the manifest's files table and rerun doctor"
+    )]
+    UnmanagedChange { path: String },
 }
 
 /// How a pending transaction was resolved.
@@ -466,10 +472,37 @@ fn observed_stable_id_counter(project: &Project) -> u64 {
     max
 }
 
+/// Whether `path` is inside the managed file domain absorb may rewrite:
+/// the manifest, the lock, or a `*.json` document under `regions/**` or
+/// `entities/**` — the paths the loader and the project hash cover.
+/// Anything else (the audit tree, plans, engine internals, or a path that
+/// would leave the root) is hand-edited manifest damage, not an external
+/// edit, and must never reach the staged writes.
+fn is_managed_file(path: &str) -> bool {
+    if path == MANIFEST_FILE || path == LOCK_FILE {
+        return true;
+    }
+    crate::ir::is_project_relative(path)
+        && path.ends_with(".json")
+        && (path.starts_with("regions/") || path.starts_with("entities/"))
+}
+
 fn absorb_external_edit(
     project: &Project,
     integrity: &IntegrityError,
 ) -> Result<AuditEntry, DoctorError> {
+    // Absorb stages rewrites only for the managed file domain. A path in
+    // `changed` outside it came from a hand-edited files table pointing at
+    // a file the engine does not own — staging it would rewrite or DELETE
+    // that file (the audit log included, leaving a broken chain), so the
+    // run refuses and names the path for repair instead.
+    for path in &integrity.changed {
+        if !is_managed_file(path.as_str()) {
+            return Err(DoctorError::UnmanagedChange {
+                path: path.as_str().to_string(),
+            });
+        }
+    }
     let mut digest_rows = Vec::new();
     for path in &integrity.changed {
         let before = project

@@ -1430,6 +1430,56 @@ fn absorb_marks_validator_findings_advisory_and_flags_noncanonical_files() {
 }
 
 #[test]
+fn absorb_refuses_a_files_table_path_outside_the_managed_domain() {
+    let tmp = tempfile::tempdir().unwrap();
+    Project::init(tmp.path(), false, &rpg_modules()).unwrap();
+    let mut engine = open_engine(tmp.path());
+    apply_note(&mut engine, "hello");
+    drop(engine);
+
+    let log_before = std::fs::read(tmp.path().join("audit/audit.jsonl")).unwrap();
+
+    // A hand-edited manifest whose files table names the audit log — a path
+    // outside the managed domain absorb may rewrite.
+    let manifest_path = tmp.path().join("project.systole.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["files"]["audit/audit.jsonl"] = json!("sha256:deadbeef");
+    std::fs::write(
+        &manifest_path,
+        systole_core::ir::format::format_value(&manifest),
+    )
+    .unwrap();
+
+    // Absorb refuses loudly rather than staging a delete of the audit log.
+    match doctor::run(tmp.path(), true, &[]) {
+        Err(doctor::DoctorError::UnmanagedChange { path }) => {
+            assert_eq!(path, "audit/audit.jsonl")
+        }
+        Err(other) => panic!("expected UnmanagedChange, got {other}"),
+        Ok(_) => panic!("absorb must refuse a path outside the managed domain"),
+    }
+    // The audit log is byte-identical; nothing was appended, staged, or
+    // deleted, and no marker was left behind.
+    assert_eq!(
+        std::fs::read(tmp.path().join("audit/audit.jsonl")).unwrap(),
+        log_before,
+        "the audit log survived the refused absorb untouched"
+    );
+    assert!(
+        two_phase::pending_marker_files(tmp.path())
+            .unwrap()
+            .is_empty(),
+        "no pending marker left behind"
+    );
+    // The project still reports the same integrity refusal on load.
+    assert!(matches!(
+        Project::load(tmp.path()),
+        Err(ProjectError::Integrity(_))
+    ));
+}
+
+#[test]
 fn an_interrupted_force_init_restores_the_displaced_tree_and_never_destroys_it() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("proj");

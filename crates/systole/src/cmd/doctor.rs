@@ -107,6 +107,14 @@ fn report_doctor_error(root: &Path, err: &DoctorError, json: bool) -> i32 {
                 2
             }
         }
+        DoctorError::UnmanagedChange { .. } => {
+            if json {
+                structured(root, "doctor.unmanaged_change", &err.to_string(), 2)
+            } else {
+                eprintln!("{err}");
+                2
+            }
+        }
         other => {
             if json {
                 structured(root, "engine.io", &other.to_string(), 2)
