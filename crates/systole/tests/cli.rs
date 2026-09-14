@@ -432,3 +432,70 @@ fn check_json_emits_structured_errors_for_missing_and_broken_projects() {
         serde_json::from_slice(&tampered.stdout).expect("integrity-failure output parses as JSON");
     assert_eq!(parsed["error"]["code"], "project.integrity");
 }
+
+/// A saved plan file is untrusted input: `preview` must authenticate the
+/// payload against the recorded request before executing it. A hand-edited
+/// payload — here carrying region dimensions far past the schema cap, large
+/// enough that materializing the grid would exhaust memory — is refused
+/// with a structured error before `diff` ever runs.
+#[test]
+fn preview_of_a_saved_plan_authenticates_the_payload_before_running_it() {
+    let (_g, root) = temp_project("w9-planauth");
+    let init = systole()
+        .arg("project")
+        .arg("init")
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert_eq!(init.status.code(), Some(0));
+    let plan_file = root.join("plan.json");
+
+    let plan = systole()
+        .arg("--project")
+        .arg(&root)
+        .arg("plan")
+        .arg("rpg.create_region")
+        .arg("--input")
+        .arg(r#"{"id":"town","width":16,"height":16}"#)
+        .arg("--out")
+        .arg(plan_file.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert_eq!(plan.status.code(), Some(0));
+
+    // Hand-edit the payload to absurd dimensions, then rebind plan_id so
+    // the tamper survives the id check — only the re-materialization
+    // comparison can still catch it.
+    let mut saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_file).unwrap()).unwrap();
+    saved["plan"]["payload"]["width"] = serde_json::json!(u32::MAX);
+    saved["plan"]["payload"]["height"] = serde_json::json!(u32::MAX);
+    let req: systole_core::op::PlanRequest =
+        serde_json::from_value(saved["request"].clone()).unwrap();
+    let tampered: systole_core::op::OperationPlan =
+        serde_json::from_value(saved["plan"].clone()).unwrap();
+    saved["plan"]["plan_id"] =
+        serde_json::json!(systole_core::registry::expected_plan_id(&req, &tampered));
+    std::fs::write(&plan_file, serde_json::to_string(&saved).unwrap()).unwrap();
+
+    // Refused before the payload executes: were the edited grid ever
+    // materialized, allocating its rows would not return at all.
+    let out = systole()
+        .arg("--json")
+        .arg("--project")
+        .arg(&root)
+        .arg("preview")
+        .arg(plan_file.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(envelope["error"]["code"], "op.invalid_request");
+    assert_eq!(
+        std::fs::read_to_string(root.join("audit/audit.jsonl")).unwrap(),
+        "",
+        "preview audits nothing"
+    );
+    assert!(!root.join("regions/region_00001").exists());
+}

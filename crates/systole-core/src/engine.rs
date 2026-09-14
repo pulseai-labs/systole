@@ -2,10 +2,12 @@
 //! diff → validate → commit → audit, with `preview` as the side-effect-free
 //! half and `commit`/`rollback`/`query` the explicit verbs.
 //!
-//! Ordering inside `commit`, per the spec: request↔plan agreement, capability
-//! re-check (the plan may have been made under another actor), stale-plan
-//! refusal, preview re-run for blocking findings, write lock, apply into a
-//! fresh `Transaction`, two-phase commit, release, reload.
+//! Ordering inside `commit`, per the spec: write lock, locked reload, and
+//! request↔plan authentication (agreement, plan id, capability re-check,
+//! staleness, version stamps, payload re-materialization — the same checks
+//! the saved-plan preview path runs before any payload executes), preview
+//! re-run for blocking findings, apply into a fresh `Transaction`,
+//! two-phase commit, release, reload.
 
 use std::path::{Path, PathBuf};
 
@@ -224,16 +226,21 @@ impl Engine {
         })
     }
 
-    /// plan → audit. The only way the project changes.
-    pub fn commit(
-        &mut self,
+    /// The request↔plan authentication every write runs before any payload
+    /// executes: envelope agreement, the deterministic plan id, the
+    /// capability re-check, freshness against the loaded project, version
+    /// stamps, and payload re-materialization — a hand-edited payload in a
+    /// saved plan refuses here rather than executing unvalidated.
+    ///
+    /// Reads `self.project`, so the caller picks the snapshot: `commit`
+    /// calls it on the post-lock reload, the saved-plan preview path on
+    /// the open-time load. Returns the resolved capability for the audit
+    /// entry.
+    fn verify_plan(
+        &self,
         req: &PlanRequest,
-        plan: OperationPlan,
-    ) -> Result<AuditEntry, EngineError> {
-        if is_read_only() {
-            return Err(EngineError::ReadOnly);
-        }
-
+        plan: &OperationPlan,
+    ) -> Result<Capability, EngineError> {
         // The plan must name this request (W2-A1: actor is envelope-only).
         if req.op_id != plan.op_id || req.op_version != plan.op_version {
             return Err(EngineError::InvalidRequest(format!(
@@ -241,36 +248,19 @@ impl Engine {
                 req.op_id, req.op_version, plan.op_id, plan.op_version
             )));
         }
-        if expected_plan_id(req, &plan) != plan.plan_id {
+        if expected_plan_id(req, plan) != plan.plan_id {
             return Err(EngineError::InvalidRequest(
                 "plan_id does not match this request, payload, and version stamps"
                     .into(),
             ));
         }
 
-        // Capability re-check at commit — a plan may have been materialized
-        // under a different actor or before a policy change.
+        // Capability re-check — a plan may have been materialized under a
+        // different actor or before a policy change.
         let capability = self.check_policy(&plan.op_id, plan.op_version, &req.actor)?;
 
-        // The write lock comes before every read of mutable state: a
-        // concurrent commit must not land between the staleness check and the
-        // rename phase. Reload under the lock and validate against that
-        // snapshot, not the open-time one.
-        let _lock = self.acquire_lock()?;
-        self.project = Project::load(&self.root)?;
-
-        // A marker could have been left between open and this commit — the
-        // locked snapshot is where mutable state is read, so the refusal
-        // lives here too (commit::run re-checks as the funnel).
-        let pending = commit::pending_marker_files(&self.root)?;
-        if !pending.is_empty() {
-            return Err(EngineError::PendingTransactions {
-                count: pending.len(),
-            });
-        }
-
-        // Stale-plan refusal: the plan is bound to the exact revision+hash it
-        // was materialized against.
+        // Stale-plan refusal: the plan is bound to the exact revision+hash
+        // it was materialized against.
         let manifest = &self.project.manifest;
         if plan.base_project_revision != manifest.project_revision
             || plan.base_project_hash != manifest.project_hash
@@ -320,6 +310,51 @@ impl Engine {
                 "plan payload does not match the recorded request".into(),
             ));
         }
+
+        Ok(capability)
+    }
+
+    /// Authenticate a caller-supplied plan against its recorded request and
+    /// the loaded project BEFORE its payload executes — the same checks
+    /// `commit` runs under the write lock, on the project as loaded at
+    /// open. A saved plan file is untrusted input: until this passes,
+    /// `payload` must never reach `diff`/`apply`.
+    pub fn authenticate_saved_plan(
+        &self,
+        req: &PlanRequest,
+        plan: &OperationPlan,
+    ) -> Result<(), EngineError> {
+        self.verify_plan(req, plan).map(|_| ())
+    }
+
+    /// plan → audit. The only way the project changes.
+    pub fn commit(
+        &mut self,
+        req: &PlanRequest,
+        plan: OperationPlan,
+    ) -> Result<AuditEntry, EngineError> {
+        if is_read_only() {
+            return Err(EngineError::ReadOnly);
+        }
+
+        // The write lock comes before every read of mutable state: a
+        // concurrent commit must not land between the staleness check and the
+        // rename phase. Reload under the lock and validate against that
+        // snapshot, not the open-time one.
+        let _lock = self.acquire_lock()?;
+        self.project = Project::load(&self.root)?;
+
+        // A marker could have been left between open and this commit — the
+        // locked snapshot is where mutable state is read, so the refusal
+        // lives here too (commit::run re-checks as the funnel).
+        let pending = commit::pending_marker_files(&self.root)?;
+        if !pending.is_empty() {
+            return Err(EngineError::PendingTransactions {
+                count: pending.len(),
+            });
+        }
+
+        let capability = self.verify_plan(req, &plan)?;
 
         // Preview again: blocking findings refuse before anything is staged.
         let preview = self.preview(&plan)?;

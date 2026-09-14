@@ -38,6 +38,12 @@ pub fn resolve(
         None => {
             let file = read_plan_file(&absolutize(Path::new(target)))
                 .map_err(|m| EngineErr::msg(m, 2))?;
+            // A saved plan file is untrusted input: authenticate the
+            // request↔plan pair before its payload is allowed to execute —
+            // the same checks `commit` runs under the write lock.
+            engine
+                .authenticate_saved_plan(&file.request, &file.plan)
+                .map_err(EngineErr::Engine)?;
             Ok((file.request, file.plan))
         }
     }
