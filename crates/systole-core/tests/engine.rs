@@ -1703,6 +1703,52 @@ fn an_op_staging_the_audit_log_is_refused_before_any_rename() {
     Project::load(&root).expect("project untouched by the refused commit");
 }
 
+/// An untracked symlink inside the project must not aim the commit's temp
+/// writes or renames outside the root: `entities/note` → `outside` is a
+/// project-relative path whose canonicalized ancestor leaves the project.
+/// Refused before any temp file is created, with nothing written outside.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_directory_inside_the_project_is_refused_before_any_temp_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("proj");
+    Project::init(&root, false, &rpg_modules()).unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("entities/note")).unwrap();
+
+    let mut engine = open_engine(&root);
+    let req = note_req("through the symlink");
+    let plan = engine.materialize(&req).expect("materialize");
+    let result = engine.commit(&req, plan);
+    assert!(matches!(
+        result,
+        Err(EngineError::Commit(
+            two_phase::CommitError::PathEscapes { .. }
+        ))
+    ));
+
+    // Nothing was written outside the project, no marker or temp survived,
+    // and the revision did not advance.
+    assert!(
+        std::fs::read_dir(&outside)
+            .unwrap()
+            .next()
+            .is_none(),
+        "nothing may land outside the project"
+    );
+    assert!(
+        two_phase::pending_marker_files(&root)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        engine.project().manifest.project_revision,
+        "rev_00000"
+    );
+    assert_eq!(audit::read_lines(&root).unwrap().len(), 0);
+}
+
 #[test]
 fn a_module_whose_apply_disagrees_with_its_diff_is_refused_at_commit() {
     let tmp = tempfile::tempdir().unwrap();

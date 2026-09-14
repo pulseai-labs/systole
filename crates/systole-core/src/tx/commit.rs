@@ -146,8 +146,6 @@ pub fn plan_commit(
     meta: CommitMeta,
     domain: WriteDomain,
 ) -> Result<PreparedCommit, CommitError> {
-    let _ = root;
-
     // An empty write set would still bump the revision and append an audit
     // entry — refuse before any marker exists so no-change commits leave no
     // trace.
@@ -175,6 +173,11 @@ pub fn plan_commit(
                 path: change.path.as_str().to_string(),
             });
         }
+        // Semantic containment, not just lexical: canonicalize the deepest
+        // existing ancestor of each target — a symlink inside the project
+        // (e.g. `entities/note` → `/outside`) must not aim the temp writes
+        // or renames at a directory outside the canonicalized root.
+        resolve_under_root(root, change.path.as_str())?;
     }
 
     // 1. Post-state file map.
@@ -348,7 +351,13 @@ pub fn write_marker(
     phase: &str,
 ) -> Result<(), CommitError> {
     marker.phase = phase.to_string();
-    let path = marker_path(root, &marker.transaction_id);
+    // The marker path resolves through the same gateway: a symlinked
+    // `audit/` must not aim the marker write or unlink outside the project.
+    let rel = format!(
+        "{}/{}.json",
+        audit::PENDING_DIR, marker.transaction_id
+    );
+    let path = checked_join(root, &rel)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io("audit/pending"))?;
     }
@@ -359,11 +368,42 @@ pub fn write_marker(
     .map_err(io("audit/pending"))
 }
 
+/// Resolve a staged path under `root` semantically, not just lexically:
+/// the deepest existing ancestor of the target — the target itself when it
+/// exists — must canonicalize to a location still inside the canonicalized
+/// project root. An untracked symlink in the tree would otherwise aim a
+/// temp write or rename at a directory outside the project.
+fn resolve_under_root(root: &Path, rel: &str) -> Result<PathBuf, CommitError> {
+    let abs = root.join(rel);
+    let canonical_root = fs::canonicalize(root).map_err(io(rel))?;
+    let mut probe = abs.as_path();
+    loop {
+        match fs::canonicalize(probe) {
+            Ok(resolved) => {
+                if !resolved.starts_with(&canonical_root) {
+                    return Err(CommitError::PathEscapes {
+                        path: rel.to_string(),
+                    });
+                }
+                return Ok(abs);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                probe = match probe.parent() {
+                    Some(parent) => parent,
+                    None => return Ok(abs),
+                };
+            }
+            Err(e) => return Err(io(rel)(e)),
+        }
+    }
+}
+
 /// Join a project-relative path onto `root`, refusing any path that would
-/// escape the project — the one gateway every write path funnels through.
+/// escape the project — lexically (`..`, absolute) and through symlink
+/// ancestors — the one gateway every write path funnels through.
 fn checked_join(root: &Path, rel: &str) -> Result<PathBuf, CommitError> {
     if crate::ir::is_project_relative(rel) {
-        Ok(root.join(rel))
+        resolve_under_root(root, rel)
     } else {
         Err(CommitError::PathEscapes {
             path: rel.to_string(),
@@ -431,12 +471,21 @@ pub fn apply_renames(root: &Path, prepared: &PreparedCommit) -> Result<(), Commi
 
 /// Append the entry's canonical line to `audit/audit.jsonl`.
 pub fn append_entry(root: &Path, entry: &AuditEntry) -> Result<(), CommitError> {
+    // The audit log's own path resolves through the gateway: a symlinked
+    // `audit/` must not aim the append outside the project.
+    checked_join(root, audit::LOG_FILE)?;
     audit::append_line(root, &audit::canonical_line(entry)).map_err(io(audit::LOG_FILE))
 }
 
 /// Remove the pending marker.
 pub fn remove_marker(root: &Path, marker: &PendingMarker) -> Result<(), CommitError> {
-    let path = marker_path(root, &marker.transaction_id);
+    // The marker path resolves through the same gateway: a symlinked
+    // `audit/` must not aim the marker write or unlink outside the project.
+    let rel = format!(
+        "{}/{}.json",
+        audit::PENDING_DIR, marker.transaction_id
+    );
+    let path = checked_join(root, &rel)?;
     // The error names the marker itself — doctor propagates it so a failed
     // unlink surfaces as a refusal, never a silent success.
     let label = path.display().to_string();
